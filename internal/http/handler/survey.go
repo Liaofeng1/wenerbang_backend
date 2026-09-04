@@ -53,12 +53,11 @@ func (h *SurveyHandler) ListMine(c *gin.Context) {
 }
 
 func (h *SurveyHandler) Get(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		httpx.Fail(c, http.StatusBadRequest, "无效 ID")
+	id, ok := parseID(c)
+	if !ok {
 		return
 	}
-	survey, err := h.surveys.Get(uint(id))
+	survey, err := h.surveys.Get(id)
 	if err != nil {
 		mapSurveyErr(c, err)
 		return
@@ -66,13 +65,64 @@ func (h *SurveyHandler) Get(c *gin.Context) {
 	httpx.OK(c, survey)
 }
 
-func (h *SurveyHandler) Complete(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		httpx.Fail(c, http.StatusBadRequest, "无效 ID")
+func (h *SurveyHandler) Start(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
 		return
 	}
-	completion, err := h.surveys.Complete(uint(id), middleware.UserID(c))
+	view, err := h.surveys.Start(id, middleware.UserID(c))
+	if err != nil {
+		mapSurveyErr(c, err)
+		return
+	}
+	httpx.OK(c, view)
+}
+
+func (h *SurveyHandler) Leave(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	view, err := h.surveys.Leave(id, middleware.UserID(c))
+	if err != nil {
+		mapSurveyErr(c, err)
+		return
+	}
+	httpx.OK(c, view)
+}
+
+func (h *SurveyHandler) Return(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	view, err := h.surveys.Return(id, middleware.UserID(c))
+	if err != nil {
+		mapSurveyErr(c, err)
+		return
+	}
+	httpx.OK(c, view)
+}
+
+func (h *SurveyHandler) Session(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	view, err := h.surveys.GetSession(id, middleware.UserID(c))
+	if err != nil {
+		mapSurveyErr(c, err)
+		return
+	}
+	httpx.OK(c, view)
+}
+
+func (h *SurveyHandler) Complete(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	completion, err := h.surveys.Complete(id, middleware.UserID(c))
 	if err != nil {
 		mapSurveyErr(c, err)
 		return
@@ -89,16 +139,26 @@ func (h *SurveyHandler) ListMyCompletions(c *gin.Context) {
 	httpx.OK(c, list)
 }
 
+func parseID(c *gin.Context) (uint, bool) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		httpx.Fail(c, http.StatusBadRequest, "无效 ID")
+		return 0, false
+	}
+	return uint(id), true
+}
+
 func mapSurveyErr(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, service.ErrNotFound):
 		httpx.Fail(c, http.StatusNotFound, err.Error())
-	case errors.Is(err, service.ErrInsufficientPts):
-		httpx.Fail(c, http.StatusBadRequest, err.Error())
-	case errors.Is(err, service.ErrAlreadyCompleted),
+	case errors.Is(err, service.ErrInsufficientPts),
+		errors.Is(err, service.ErrAlreadyCompleted),
 		errors.Is(err, service.ErrOwnSurvey),
 		errors.Is(err, service.ErrSurveyClosed),
-		errors.Is(err, service.ErrBadSurveyInput):
+		errors.Is(err, service.ErrBadSurveyInput),
+		errors.Is(err, service.ErrNeedOpenFirst),
+		errors.Is(err, service.ErrAwayTooShort):
 		httpx.Fail(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, service.ErrForbidden):
 		httpx.Fail(c, http.StatusForbidden, err.Error())
