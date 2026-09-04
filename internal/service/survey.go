@@ -3,9 +3,11 @@ package service
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 
+	"wenbang/internal/config"
 	"wenbang/internal/model"
 )
 
@@ -17,6 +19,8 @@ var (
 	ErrOwnSurvey        = errors.New("不能填写自己发布的问卷")
 	ErrSurveyClosed     = errors.New("问卷已结束")
 	ErrBadSurveyInput   = errors.New("问卷参数不合法")
+	ErrNeedOpenFirst    = errors.New("请先点击「打开问卷」再填写")
+	ErrAwayTooShort     = errors.New("离开填写时间过短，请认真作答后再提交")
 )
 
 type SurveyService struct {
@@ -42,7 +46,7 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 	if in.Title == "" || in.Link == "" || in.TargetCount <= 0 || in.RewardPoints <= 0 {
 		return nil, ErrBadSurveyInput
 	}
-	cost := in.TargetCount * in.RewardPoints
+	cost := config.PublishCost() // fixed publish cost (default 5)
 
 	var survey model.Survey
 	err := s.db.Transaction(func(tx *gorm.DB) error {
@@ -109,31 +113,200 @@ func (s *SurveyService) Get(id uint) (*model.Survey, error) {
 	return &survey, nil
 }
 
-func (s *SurveyService) Complete(surveyID, userID uint) (*model.Completion, error) {
-	var completion model.Completion
+type SessionView struct {
+	SurveyID       uint `json:"survey_id"`
+	AwaySeconds    int  `json:"away_seconds"`
+	MinAwaySeconds int  `json:"min_away_seconds"`
+	Ready          bool `json:"ready"`
+}
+
+func (s *SurveyService) ensureFillable(tx *gorm.DB, surveyID, userID uint) (*model.Survey, error) {
+	var survey model.Survey
+	if err := tx.First(&survey, surveyID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if survey.Status != model.SurveyStatusOpen {
+		return nil, ErrSurveyClosed
+	}
+	if survey.PublisherID == userID {
+		return nil, ErrOwnSurvey
+	}
+	var existing int64
+	if err := tx.Model(&model.Completion{}).
+		Where("survey_id = ? AND user_id = ?", surveyID, userID).
+		Count(&existing).Error; err != nil {
+		return nil, err
+	}
+	if existing > 0 {
+		return nil, ErrAlreadyCompleted
+	}
+	return &survey, nil
+}
+
+func (s *SurveyService) Start(surveyID, userID uint) (*SessionView, error) {
+	var view SessionView
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		var survey model.Survey
-		if err := tx.First(&survey, surveyID).Error; err != nil {
+		if _, err := s.ensureFillable(tx, surveyID, userID); err != nil {
+			return err
+		}
+		now := time.Now()
+		var session model.SurveySession
+		err := tx.Where("survey_id = ? AND user_id = ?", surveyID, userID).First(&session).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			session = model.SurveySession{
+				SurveyID:  surveyID,
+				UserID:    userID,
+				StartedAt: now,
+			}
+			if err := tx.Create(&session).Error; err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		} else {
+			// reopen: keep accumulated away, clear in-progress leave
+			session.LeftAt = nil
+			if err := tx.Save(&session).Error; err != nil {
+				return err
+			}
+		}
+		view = toSessionView(&session)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &view, nil
+}
+
+func (s *SurveyService) Leave(surveyID, userID uint) (*SessionView, error) {
+	var view SessionView
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if _, err := s.ensureFillable(tx, surveyID, userID); err != nil {
+			return err
+		}
+		var session model.SurveySession
+		if err := tx.Where("survey_id = ? AND user_id = ?", surveyID, userID).First(&session).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrNotFound
+				return ErrNeedOpenFirst
 			}
 			return err
 		}
-		if survey.Status != model.SurveyStatusOpen {
-			return ErrSurveyClosed
+		if session.LeftAt == nil {
+			now := time.Now()
+			session.LeftAt = &now
+			if err := tx.Save(&session).Error; err != nil {
+				return err
+			}
 		}
-		if survey.PublisherID == userID {
-			return ErrOwnSurvey
-		}
+		view = toSessionView(&session)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &view, nil
+}
 
-		var existing int64
-		if err := tx.Model(&model.Completion{}).
-			Where("survey_id = ? AND user_id = ?", surveyID, userID).
-			Count(&existing).Error; err != nil {
+func (s *SurveyService) Return(surveyID, userID uint) (*SessionView, error) {
+	var view SessionView
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if _, err := s.ensureFillable(tx, surveyID, userID); err != nil {
 			return err
 		}
-		if existing > 0 {
-			return ErrAlreadyCompleted
+		var session model.SurveySession
+		if err := tx.Where("survey_id = ? AND user_id = ?", surveyID, userID).First(&session).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNeedOpenFirst
+			}
+			return err
+		}
+		if session.LeftAt != nil {
+			now := time.Now()
+			delta := int(now.Sub(*session.LeftAt).Seconds())
+			if delta < 0 {
+				delta = 0
+			}
+			session.AwaySeconds += delta
+			session.LeftAt = nil
+			session.ReturnedAt = &now
+			if err := tx.Save(&session).Error; err != nil {
+				return err
+			}
+		}
+		view = toSessionView(&session)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &view, nil
+}
+
+func (s *SurveyService) GetSession(surveyID, userID uint) (*SessionView, error) {
+	var session model.SurveySession
+	if err := s.db.Where("survey_id = ? AND user_id = ?", surveyID, userID).First(&session).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return &SessionView{
+				SurveyID:       surveyID,
+				AwaySeconds:    0,
+				MinAwaySeconds: config.MinAwaySeconds(),
+				Ready:          false,
+			}, nil
+		}
+		return nil, err
+	}
+	view := toSessionView(&session)
+	return &view, nil
+}
+
+func toSessionView(session *model.SurveySession) SessionView {
+	away := session.AwaySeconds
+	if session.LeftAt != nil {
+		delta := int(time.Since(*session.LeftAt).Seconds())
+		if delta > 0 {
+			away += delta
+		}
+	}
+	minAway := config.MinAwaySeconds()
+	return SessionView{
+		SurveyID:       session.SurveyID,
+		AwaySeconds:    away,
+		MinAwaySeconds: minAway,
+		Ready:          away >= minAway,
+	}
+}
+
+func (s *SurveyService) Complete(surveyID, userID uint) (*model.Completion, error) {
+	var completion model.Completion
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		survey, err := s.ensureFillable(tx, surveyID, userID)
+		if err != nil {
+			return err
+		}
+
+		var session model.SurveySession
+		if err := tx.Where("survey_id = ? AND user_id = ?", surveyID, userID).First(&session).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNeedOpenFirst
+			}
+			return err
+		}
+		// If still away, close the leave interval now.
+		if session.LeftAt != nil {
+			now := time.Now()
+			delta := int(now.Sub(*session.LeftAt).Seconds())
+			if delta > 0 {
+				session.AwaySeconds += delta
+			}
+			session.LeftAt = nil
+			session.ReturnedAt = &now
+		}
+		if session.AwaySeconds < config.MinAwaySeconds() {
+			return ErrAwayTooShort
 		}
 
 		var filler model.User
@@ -149,6 +322,7 @@ func (s *SurveyService) Complete(surveyID, userID uint) (*model.Completion, erro
 			SurveyID:     surveyID,
 			UserID:       userID,
 			PointsEarned: survey.RewardPoints,
+			AwaySeconds:  session.AwaySeconds,
 		}
 		if err := tx.Create(&completion).Error; err != nil {
 			return err
@@ -158,7 +332,10 @@ func (s *SurveyService) Complete(surveyID, userID uint) (*model.Completion, erro
 		if survey.FilledCount >= survey.TargetCount {
 			survey.Status = model.SurveyStatusClosed
 		}
-		return tx.Save(&survey).Error
+		if err := tx.Save(survey).Error; err != nil {
+			return err
+		}
+		return tx.Save(&session).Error
 	})
 	if err != nil {
 		return nil, err
