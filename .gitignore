@@ -1,0 +1,14 @@
+# binaries / local db
+wenbang.db
+wenbang.db-*
+*.exe
+wenbang-server
+
+# env
+.env
+
+# ide
+.idea/
+.vscode/
+*.log
+.DS_Store
