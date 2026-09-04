@@ -35,3 +35,21 @@ func RegisterBonus() int {
 	}
 	return n
 }
+
+// PublishCost is the fixed points deducted when publishing one survey.
+func PublishCost() int {
+	n, err := strconv.Atoi(getenv("PUBLISH_COST", "5"))
+	if err != nil || n <= 0 {
+		return 5
+	}
+	return n
+}
+
+// MinAwaySeconds is the minimum time a user must stay away (filling) before complete.
+func MinAwaySeconds() int {
+	n, err := strconv.Atoi(getenv("MIN_AWAY_SECONDS", "30"))
+	if err != nil || n < 0 {
+		return 30
+	}
+	return n
+}

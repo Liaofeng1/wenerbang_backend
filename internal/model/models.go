@@ -39,7 +39,21 @@ type Completion struct {
 	SurveyID     uint      `gorm:"uniqueIndex:idx_survey_user;not null" json:"survey_id"`
 	UserID       uint      `gorm:"uniqueIndex:idx_survey_user;not null" json:"user_id"`
 	PointsEarned int       `gorm:"not null" json:"points_earned"`
+	AwaySeconds  int       `gorm:"not null;default:0" json:"away_seconds"`
 	CreatedAt    time.Time `json:"created_at"`
 
 	SurveyTitle string `gorm:"-" json:"survey_title,omitempty"`
+}
+
+// SurveySession tracks open → leave → return for anti-spam timing.
+type SurveySession struct {
+	ID          uint       `gorm:"primaryKey" json:"id"`
+	SurveyID    uint       `gorm:"uniqueIndex:idx_session_user_survey;not null" json:"survey_id"`
+	UserID      uint       `gorm:"uniqueIndex:idx_session_user_survey;not null" json:"user_id"`
+	StartedAt   time.Time  `json:"started_at"`
+	LeftAt      *time.Time `json:"left_at,omitempty"`
+	ReturnedAt  *time.Time `json:"returned_at,omitempty"`
+	AwaySeconds int        `gorm:"not null;default:0" json:"away_seconds"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }

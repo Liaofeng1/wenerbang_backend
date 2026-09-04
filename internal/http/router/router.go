@@ -46,6 +46,10 @@ func New(db *gorm.DB) *gin.Engine {
 			auth.GET("/surveys", surveyH.List)
 			auth.GET("/surveys/mine", surveyH.ListMine)
 			auth.GET("/surveys/:id", surveyH.Get)
+			auth.POST("/surveys/:id/start", surveyH.Start)
+			auth.POST("/surveys/:id/leave", surveyH.Leave)
+			auth.POST("/surveys/:id/return", surveyH.Return)
+			auth.GET("/surveys/:id/session", surveyH.Session)
 			auth.POST("/surveys/:id/complete", surveyH.Complete)
 			auth.GET("/completions/mine", surveyH.ListMyCompletions)
 		}
