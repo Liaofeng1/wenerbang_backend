@@ -29,7 +29,7 @@ func Run() error {
 	}
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&model.User{}, &model.Survey{}, &model.Completion{}, &model.SurveySession{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.Survey{}, &model.Completion{}, &model.SurveySession{}, &model.FillReport{}); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	if err := backfillInviteCodes(db); err != nil {

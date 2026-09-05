@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -36,6 +37,19 @@ func (h *MeHandler) Update(c *gin.Context) {
 	user, err := h.auth.UpdateProfile(middleware.UserID(c), req)
 	if err != nil {
 		httpx.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpx.OK(c, user)
+}
+
+func (h *MeHandler) CheckIn(c *gin.Context) {
+	user, err := h.auth.CheckIn(middleware.UserID(c))
+	if err != nil {
+		if errors.Is(err, service.ErrAlreadyCheckedIn) {
+			httpx.Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpx.Fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	httpx.OK(c, user)

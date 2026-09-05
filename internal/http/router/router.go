@@ -45,6 +45,7 @@ func New(db *gorm.DB) *gin.Engine {
 			auth.GET("/me", meH.Me)
 			auth.PATCH("/me", meH.Update)
 			auth.PUT("/me", meH.Update)
+			auth.POST("/me/checkin", meH.CheckIn)
 			auth.POST("/surveys", surveyH.Create)
 			auth.GET("/surveys", surveyH.List)
 			auth.GET("/surveys/mine", surveyH.ListMine)
@@ -55,6 +56,7 @@ func New(db *gorm.DB) *gin.Engine {
 			auth.POST("/surveys/:id/return", surveyH.Return)
 			auth.GET("/surveys/:id/session", surveyH.Session)
 			auth.POST("/surveys/:id/complete", surveyH.Complete)
+			auth.POST("/surveys/:id/report", surveyH.Report)
 			auth.GET("/completions/mine", surveyH.ListMyCompletions)
 		}
 	}

@@ -12,6 +12,7 @@ import (
 
 	jwtauth "wenbang/internal/auth"
 	"wenbang/internal/config"
+	"wenbang/internal/level"
 	"wenbang/internal/model"
 )
 
@@ -21,6 +22,7 @@ var (
 	ErrWeakInput          = errors.New("用户名和密码不能为空")
 	ErrInvalidInviteCode  = errors.New("邀请链接无效或已失效")
 	ErrInvalidProfile     = errors.New("请完善性别、南北方与城市线级")
+	ErrAlreadyCheckedIn   = errors.New("今日已签到")
 )
 
 const inviteCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -68,8 +70,8 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 	if !model.IsValidGender(gender) || !model.IsValidRegion(region) || !model.IsValidCityTier(cityTier) {
 		return nil, ErrInvalidProfile
 	}
-	if major != "" && !validDiscipline(major) {
-		return nil, errors.New("专业请选择学术型学科门类")
+	if major == "" || !validDiscipline(major) {
+		return nil, errors.New("请选择专业学科门类")
 	}
 	if school == "" {
 		school = "中国人民大学"
@@ -166,6 +168,12 @@ func (s *AuthService) Login(username, password string) (*AuthResult, error) {
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		return nil, ErrInvalidCredentials
 	}
+	if err := ClearExpiredBan(s.db, &user); err != nil {
+		return nil, err
+	}
+	if err := s.db.First(&user, user.ID).Error; err != nil {
+		return nil, err
+	}
 	if err := s.ensureInviteCode(&user); err != nil {
 		return nil, err
 	}
@@ -177,9 +185,16 @@ func (s *AuthService) GetUser(id uint) (*model.User, error) {
 	if err := s.db.First(&user, id).Error; err != nil {
 		return nil, err
 	}
+	if err := ClearExpiredBan(s.db, &user); err != nil {
+		return nil, err
+	}
+	if err := s.db.First(&user, id).Error; err != nil {
+		return nil, err
+	}
 	if err := s.ensureInviteCode(&user); err != nil {
 		return nil, err
 	}
+	level.FillUser(&user)
 	return &user, nil
 }
 
@@ -238,6 +253,30 @@ func (s *AuthService) UpdateProfile(userID uint, in UpdateProfileInput) (*model.
 	if err := s.db.Save(&user).Error; err != nil {
 		return nil, err
 	}
+	level.FillUser(&user)
+	return &user, nil
+}
+
+func (s *AuthService) CheckIn(userID uint) (*model.User, error) {
+	var user model.User
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&user, userID).Error; err != nil {
+			return err
+		}
+		today := level.Today()
+		if user.LastCheckIn == today {
+			return ErrAlreadyCheckedIn
+		}
+		// 签到：+经验（升级权益）+ 固定积分（发卷消费）
+		user.Points += level.DailyCheckInPoints
+		level.AddExp(&user, level.XPCheckIn)
+		user.LastCheckIn = today
+		return tx.Save(&user).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	level.FillUser(&user)
 	return &user, nil
 }
 
@@ -298,5 +337,6 @@ func (s *AuthService) issue(user *model.User) (*AuthResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	level.FillUser(user)
 	return &AuthResult{Token: token, User: user}, nil
 }

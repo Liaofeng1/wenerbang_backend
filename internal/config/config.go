@@ -101,3 +101,43 @@ func TargetingDeliveryMult() int {
 	}
 	return n
 }
+
+func ReportFastRatio() float64 {
+	n, err := strconv.ParseFloat(getenv("REPORT_FAST_RATIO", "0.5"), 64)
+	if err != nil || n <= 0 || n >= 1 {
+		return 0.5
+	}
+	return n
+}
+
+func ReportSlowRatio() float64 {
+	n, err := strconv.ParseFloat(getenv("REPORT_SLOW_RATIO", "2.0"), 64)
+	if err != nil || n <= 1 {
+		return 2.0
+	}
+	return n
+}
+
+func WarnLimit() int {
+	n, err := strconv.Atoi(getenv("WARN_LIMIT", "3"))
+	if err != nil || n < 1 {
+		return 3
+	}
+	return n
+}
+
+func BanDays() int {
+	n, err := strconv.Atoi(getenv("BAN_DAYS", "14"))
+	if err != nil || n < 1 {
+		return 14
+	}
+	return n
+}
+
+func MaxShelfDays() int {
+	n, err := strconv.Atoi(getenv("MAX_SHELF_DAYS", "60"))
+	if err != nil || n < 1 {
+		return 60
+	}
+	return n
+}

@@ -161,6 +161,26 @@ func parseID(c *gin.Context) (uint, bool) {
 	return uint(id), true
 }
 
+func (h *SurveyHandler) Report(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		UserID uint `json:"user_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.UserID == 0 {
+		httpx.Fail(c, http.StatusBadRequest, "请指定要举报的填写者")
+		return
+	}
+	res, err := h.surveys.ReportFiller(id, middleware.UserID(c), req.UserID)
+	if err != nil {
+		mapSurveyErr(c, err)
+		return
+	}
+	httpx.OK(c, res)
+}
+
 func mapSurveyErr(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, service.ErrNotFound):
@@ -174,7 +194,12 @@ func mapSurveyErr(c *gin.Context, err error) {
 		errors.Is(err, service.ErrAwayTooShort),
 		errors.Is(err, service.ErrProfileMismatch),
 		errors.Is(err, service.ErrAudienceMismatch),
-		errors.Is(err, service.ErrDeliveryFull):
+		errors.Is(err, service.ErrDeliveryFull),
+		errors.Is(err, service.ErrUserBanned),
+		errors.Is(err, service.ErrAlreadyReported),
+		errors.Is(err, service.ErrReportNotAbnormal),
+		errors.Is(err, service.ErrReportNoCompletion),
+		errors.Is(err, service.ErrReportSelf):
 		httpx.Fail(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, service.ErrForbidden):
 		httpx.Fail(c, http.StatusForbidden, err.Error())

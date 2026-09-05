@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 
 	"wenbang/internal/config"
+	"wenbang/internal/level"
 	"wenbang/internal/model"
 	"wenbang/internal/points"
 )
@@ -55,10 +56,45 @@ type CreateSurveyInput struct {
 	TargetGenders       []string `json:"target_genders"`
 	TargetRegions       []string `json:"target_regions"`
 	TargetCityTiers     []string `json:"target_city_tiers"`
+	ShelfDays           int      `json:"shelf_days"`
 }
 
 func validPinHours(h int) bool {
 	return h == 0 || h == 4 || h == 6 || h == 8
+}
+
+func (s *SurveyService) expireDueSurveys(tx *gorm.DB) error {
+	now := time.Now()
+	var due []model.Survey
+	if err := tx.Where("status = ? AND expires_at IS NOT NULL AND expires_at <= ?", model.SurveyStatusOpen, now).
+		Find(&due).Error; err != nil {
+		return err
+	}
+	for i := range due {
+		sv := &due[i]
+		sv.Status = model.SurveyStatusClosed
+		if err := refundFrozenBounty(tx, sv); err != nil {
+			return err
+		}
+		if err := tx.Save(sv).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *SurveyService) closeIfExpired(tx *gorm.DB, sv *model.Survey) error {
+	if sv == nil || sv.Status != model.SurveyStatusOpen || sv.ExpiresAt == nil {
+		return nil
+	}
+	if time.Now().Before(*sv.ExpiresAt) {
+		return nil
+	}
+	sv.Status = model.SurveyStatusClosed
+	if err := refundFrozenBounty(tx, sv); err != nil {
+		return err
+	}
+	return tx.Save(sv).Error
 }
 
 func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.Survey, error) {
@@ -84,6 +120,10 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 		return nil, ErrBadSurveyInput
 	}
 	if !validPinHours(in.PinHours) {
+		return nil, ErrBadSurveyInput
+	}
+	maxShelf := config.MaxShelfDays()
+	if in.ShelfDays < 1 || in.ShelfDays > maxShelf {
 		return nil, ErrBadSurveyInput
 	}
 
@@ -132,9 +172,8 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 
 	listing := config.PublishCost()
 	bountyFreeze := in.BountyCount * in.BountyPer
-	pinCost := in.PinHours * config.PinHourlyCost()
-	targetingCost := in.TargetAudienceCount * config.TargetingCostPerUser()
-	need := listing + bountyFreeze + pinCost + targetingCost
+	rawPinCost := in.PinHours * config.PinHourlyCost()
+	rawTargetingCost := in.TargetAudienceCount * config.TargetingCostPerUser()
 	peak := points.PeakReward(in.ExpectedFillSeconds)
 
 	var pinUntil *time.Time
@@ -145,17 +184,45 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 
 	var survey model.Survey
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := EnsureNotBanned(tx, publisherID); err != nil {
+			return err
+		}
 		var user model.User
 		if err := tx.First(&user, publisherID).Error; err != nil {
 			return err
 		}
+		lv := level.LevelOf(user.Exp)
+		pinCost := level.ApplyPinDiscount(rawPinCost, lv)
+		targetingCost := level.ApplyTargetingDiscount(rawTargetingCost, lv)
+
+		// Monthly free pin: one use waives pin fee entirely.
+		month := level.MonthKey()
+		if user.FreePinMonth != month {
+			user.FreePinMonth = month
+			user.FreePinUsed = 0
+		}
+		usedFree := false
+		if in.PinHours > 0 && pinCost > 0 {
+			remain := level.FreePinsAllowed(lv) - user.FreePinUsed
+			if remain > 0 {
+				pinCost = 0
+				user.FreePinUsed++
+				usedFree = true
+			}
+		}
+		_ = usedFree
+
+		need := listing + bountyFreeze + pinCost + targetingCost
 		if user.Points < need {
 			return ErrInsufficientPts
 		}
 		user.Points -= need
+		level.AddExp(&user, level.XPPublish)
 		if err := tx.Save(&user).Error; err != nil {
 			return err
 		}
+		expires := time.Now().Add(time.Duration(in.ShelfDays) * 24 * time.Hour)
+		expiresAt := &expires
 		survey = model.Survey{
 			PublisherID:         publisherID,
 			Title:               in.Title,
@@ -177,6 +244,8 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 			TargetAudienceCount: in.TargetAudienceCount,
 			TargetingReached:    0,
 			FilledCount:         0,
+			ShelfDays:           in.ShelfDays,
+			ExpiresAt:           expiresAt,
 			Status:              model.SurveyStatusOpen,
 			TargetGenders:       genders,
 			TargetGendersRaw:    strings.Join(genders, ","),
@@ -197,6 +266,9 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 }
 
 func (s *SurveyService) ListOpen(viewerID uint) ([]model.Survey, error) {
+	if err := s.expireDueSurveys(s.db); err != nil {
+		return nil, err
+	}
 	var viewer model.User
 	if err := s.db.First(&viewer, viewerID).Error; err != nil {
 		return nil, err
@@ -238,6 +310,9 @@ func (s *SurveyService) ListOpen(viewerID uint) ([]model.Survey, error) {
 }
 
 func (s *SurveyService) ListMine(userID uint) ([]model.Survey, error) {
+	if err := s.expireDueSurveys(s.db); err != nil {
+		return nil, err
+	}
 	var list []model.Survey
 	if err := s.db.Where("publisher_id = ?", userID).Order("id desc").Find(&list).Error; err != nil {
 		return nil, err
@@ -253,6 +328,9 @@ func (s *SurveyService) Get(id uint) (*model.Survey, error) {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
+		return nil, err
+	}
+	if err := s.closeIfExpired(s.db, &survey); err != nil {
 		return nil, err
 	}
 	var pub model.User
@@ -330,11 +408,17 @@ func attachPinFlagsPtr(list []model.Survey) {
 }
 
 func (s *SurveyService) ensureFillable(tx *gorm.DB, surveyID, userID uint) (*model.Survey, error) {
+	if err := EnsureNotBanned(tx, userID); err != nil {
+		return nil, err
+	}
 	var survey model.Survey
 	if err := tx.First(&survey, surveyID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
+		return nil, err
+	}
+	if err := s.closeIfExpired(tx, &survey); err != nil {
 		return nil, err
 	}
 	if survey.Status != model.SurveyStatusOpen {
@@ -576,6 +660,7 @@ func (s *SurveyService) Complete(surveyID, userID uint) (*model.Completion, erro
 		}
 		earned := base + bounty
 		filler.Points += earned
+		level.AddExp(&filler, level.XPFill)
 		if err := tx.Save(&filler).Error; err != nil {
 			return err
 		}
