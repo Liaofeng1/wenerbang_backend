@@ -21,6 +21,7 @@ var (
 	ErrBadSurveyInput   = errors.New("问卷参数不合法")
 	ErrNeedOpenFirst    = errors.New("请先点击「打开问卷」再填写")
 	ErrAwayTooShort     = errors.New("离开填写时间过短，请认真作答后再提交")
+	ErrDegreeMismatch   = errors.New("该问卷未面向你的学位类别")
 )
 
 type SurveyService struct {
@@ -32,11 +33,12 @@ func NewSurveyService(db *gorm.DB) *SurveyService {
 }
 
 type CreateSurveyInput struct {
-	Title        string `json:"title"`
-	Link         string `json:"link"`
-	Description  string `json:"description"`
-	TargetCount  int    `json:"target_count"`
-	RewardPoints int    `json:"reward_points"`
+	Title         string   `json:"title"`
+	Link          string   `json:"link"`
+	Description   string   `json:"description"`
+	TargetCount   int      `json:"target_count"`
+	RewardPoints  int      `json:"reward_points"`
+	TargetDegrees []string `json:"target_degrees"`
 }
 
 func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.Survey, error) {
@@ -44,6 +46,10 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 	in.Link = strings.TrimSpace(in.Link)
 	in.Description = strings.TrimSpace(in.Description)
 	if in.Title == "" || in.Link == "" || in.TargetCount <= 0 || in.RewardPoints <= 0 {
+		return nil, ErrBadSurveyInput
+	}
+	targets, ok := model.NormalizeDegreeTags(in.TargetDegrees)
+	if !ok {
 		return nil, ErrBadSurveyInput
 	}
 	cost := config.PublishCost() // fixed publish cost (default 5)
@@ -62,14 +68,16 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 			return err
 		}
 		survey = model.Survey{
-			PublisherID:  publisherID,
-			Title:        in.Title,
-			Link:         in.Link,
-			Description:  in.Description,
-			TargetCount:  in.TargetCount,
-			RewardPoints: in.RewardPoints,
-			FilledCount:  0,
-			Status:       model.SurveyStatusOpen,
+			PublisherID:      publisherID,
+			Title:            in.Title,
+			Link:             in.Link,
+			Description:      in.Description,
+			TargetCount:      in.TargetCount,
+			RewardPoints:     in.RewardPoints,
+			FilledCount:      0,
+			Status:           model.SurveyStatusOpen,
+			TargetDegrees:    targets,
+			TargetDegreesRaw: strings.Join(targets, ","),
 		}
 		return tx.Create(&survey).Error
 	})
@@ -79,14 +87,27 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 	return &survey, nil
 }
 
-func (s *SurveyService) ListOpen(excludeUserID uint) ([]model.Survey, error) {
+func (s *SurveyService) ListOpen(viewerID uint) ([]model.Survey, error) {
+	var viewer model.User
+	if err := s.db.Select("id, degree_tag").First(&viewer, viewerID).Error; err != nil {
+		return nil, err
+	}
+
 	var list []model.Survey
 	q := s.db.Where("status = ?", model.SurveyStatusOpen).Order("id desc")
 	if err := q.Find(&list).Error; err != nil {
 		return nil, err
 	}
-	s.attachPublisherNames(list)
-	return list, nil
+
+	filtered := make([]model.Survey, 0, len(list))
+	for _, item := range list {
+		// Always show own surveys; otherwise require degree match (empty target = all).
+		if item.PublisherID == viewerID || item.AllowsDegree(viewer.DegreeTag) {
+			filtered = append(filtered, item)
+		}
+	}
+	s.attachPublisherNames(filtered)
+	return filtered, nil
 }
 
 func (s *SurveyService) ListMine(userID uint) ([]model.Survey, error) {
@@ -133,6 +154,13 @@ func (s *SurveyService) ensureFillable(tx *gorm.DB, surveyID, userID uint) (*mod
 	}
 	if survey.PublisherID == userID {
 		return nil, ErrOwnSurvey
+	}
+	var filler model.User
+	if err := tx.Select("id, degree_tag").First(&filler, userID).Error; err != nil {
+		return nil, err
+	}
+	if !survey.AllowsDegree(filler.DegreeTag) {
+		return nil, ErrDegreeMismatch
 	}
 	var existing int64
 	if err := tx.Model(&model.Completion{}).
