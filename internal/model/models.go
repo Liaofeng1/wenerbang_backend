@@ -1,6 +1,11 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+
+	"gorm.io/gorm"
+)
 
 type User struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
@@ -8,6 +13,9 @@ type User struct {
 	PasswordHash string    `gorm:"size:255;not null" json:"-"`
 	Nickname     string    `gorm:"size:64" json:"nickname"`
 	School       string    `gorm:"size:128" json:"school"`
+	Gender       string    `gorm:"size:16;index" json:"gender"`
+	Region       string    `gorm:"size:16;index" json:"region"`
+	CityTier     string    `gorm:"size:32;index" json:"city_tier"`
 	InviteCode   string    `gorm:"uniqueIndex;size:16;not null" json:"invite_code"`
 	InvitedByID  *uint     `gorm:"index" json:"invited_by_id,omitempty"`
 	Points       int       `gorm:"not null;default:0" json:"points"`
@@ -36,12 +44,52 @@ type Survey struct {
 	FrozenBounty        int       `gorm:"not null;default:0" json:"frozen_bounty"`
 	FilledCount         int       `gorm:"not null;default:0" json:"filled_count"`
 	Status              string    `gorm:"size:16;not null;default:open;index" json:"status"`
+	TargetGendersRaw    string    `gorm:"column:target_genders;size:128" json:"-"`
+	TargetRegionsRaw    string    `gorm:"column:target_regions;size:64" json:"-"`
+	TargetCityTiersRaw  string    `gorm:"column:target_city_tiers;size:128" json:"-"`
 	CreatedAt           time.Time `json:"created_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
 
-	PublisherNickname string `gorm:"-" json:"publisher_nickname,omitempty"`
-	AvgFillSeconds    int    `gorm:"-" json:"avg_fill_seconds,omitempty"`
-	EstimatedReward   int    `gorm:"-" json:"estimated_reward,omitempty"`
+	TargetGenders     []string `gorm:"-" json:"target_genders"`
+	TargetRegions     []string `gorm:"-" json:"target_regions"`
+	TargetCityTiers   []string `gorm:"-" json:"target_city_tiers"`
+	PublisherNickname string   `gorm:"-" json:"publisher_nickname,omitempty"`
+	AvgFillSeconds    int      `gorm:"-" json:"avg_fill_seconds,omitempty"`
+	EstimatedReward   int      `gorm:"-" json:"estimated_reward,omitempty"`
+}
+
+func splitCSV(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{}
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (s *Survey) BeforeSave(tx *gorm.DB) error {
+	s.TargetGendersRaw = strings.Join(s.TargetGenders, ",")
+	s.TargetRegionsRaw = strings.Join(s.TargetRegions, ",")
+	s.TargetCityTiersRaw = strings.Join(s.TargetCityTiers, ",")
+	if tx != nil && tx.Statement != nil {
+		tx.Statement.SetColumn("target_genders", s.TargetGendersRaw)
+		tx.Statement.SetColumn("target_regions", s.TargetRegionsRaw)
+		tx.Statement.SetColumn("target_city_tiers", s.TargetCityTiersRaw)
+	}
+	return nil
+}
+
+func (s *Survey) AfterFind(tx *gorm.DB) error {
+	s.TargetGenders = splitCSV(s.TargetGendersRaw)
+	s.TargetRegions = splitCSV(s.TargetRegionsRaw)
+	s.TargetCityTiers = splitCSV(s.TargetCityTiersRaw)
+	return nil
 }
 
 type Completion struct {

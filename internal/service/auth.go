@@ -20,6 +20,7 @@ var (
 	ErrUsernameTaken      = errors.New("用户名已被占用")
 	ErrWeakInput          = errors.New("用户名和密码不能为空")
 	ErrInvalidInviteCode  = errors.New("邀请链接无效或已失效")
+	ErrInvalidProfile     = errors.New("请完善性别、南北方与城市线级")
 )
 
 const inviteCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -37,16 +38,33 @@ type AuthResult struct {
 	User  *model.User `json:"user"`
 }
 
-func (s *AuthService) Register(username, password, nickname, school, inviteCode string) (*AuthResult, error) {
-	username = strings.TrimSpace(username)
-	password = strings.TrimSpace(password)
-	school = strings.TrimSpace(school)
-	inviteCode = strings.ToUpper(strings.TrimSpace(inviteCode))
+type RegisterInput struct {
+	Username   string
+	Password   string
+	Nickname   string
+	School     string
+	InviteCode string
+	Gender     string
+	Region     string
+	CityTier   string
+}
+
+func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
+	username := strings.TrimSpace(in.Username)
+	password := strings.TrimSpace(in.Password)
+	school := strings.TrimSpace(in.School)
+	inviteCode := strings.ToUpper(strings.TrimSpace(in.InviteCode))
+	gender := strings.TrimSpace(in.Gender)
+	region := strings.TrimSpace(in.Region)
+	cityTier := strings.TrimSpace(in.CityTier)
 	if username == "" || password == "" {
 		return nil, ErrWeakInput
 	}
 	if len(password) < 4 {
 		return nil, errors.New("密码至少 4 位")
+	}
+	if !model.IsValidGender(gender) || !model.IsValidRegion(region) || !model.IsValidCityTier(cityTier) {
+		return nil, ErrInvalidProfile
 	}
 	if school == "" {
 		school = "中国人民大学"
@@ -56,6 +74,7 @@ func (s *AuthService) Register(username, password, nickname, school, inviteCode 
 	if err != nil {
 		return nil, err
 	}
+	nickname := strings.TrimSpace(in.Nickname)
 	if nickname == "" {
 		nickname = username
 	}
@@ -101,6 +120,9 @@ func (s *AuthService) Register(username, password, nickname, school, inviteCode 
 			PasswordHash: string(hash),
 			Nickname:     nickname,
 			School:       school,
+			Gender:       gender,
+			Region:       region,
+			CityTier:     cityTier,
 			InviteCode:   code,
 			InvitedByID:  invitedBy,
 			Points:       points,

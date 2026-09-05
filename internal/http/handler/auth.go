@@ -24,6 +24,9 @@ type registerReq struct {
 	Nickname   string `json:"nickname"`
 	School     string `json:"school"`
 	InviteCode string `json:"invite_code"`
+	Gender     string `json:"gender"`
+	Region     string `json:"region"`
+	CityTier   string `json:"city_tier"`
 }
 
 type loginReq struct {
@@ -37,13 +40,23 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		httpx.Fail(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	res, err := h.auth.Register(req.Username, req.Password, req.Nickname, req.School, req.InviteCode)
+	res, err := h.auth.Register(service.RegisterInput{
+		Username:   req.Username,
+		Password:   req.Password,
+		Nickname:   req.Nickname,
+		School:     req.School,
+		InviteCode: req.InviteCode,
+		Gender:     req.Gender,
+		Region:     req.Region,
+		CityTier:   req.CityTier,
+	})
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrUsernameTaken):
 			httpx.Fail(c, http.StatusConflict, err.Error())
 		case errors.Is(err, service.ErrWeakInput),
-			errors.Is(err, service.ErrInvalidInviteCode):
+			errors.Is(err, service.ErrInvalidInviteCode),
+			errors.Is(err, service.ErrInvalidProfile):
 			httpx.Fail(c, http.StatusBadRequest, err.Error())
 		default:
 			httpx.Fail(c, http.StatusBadRequest, err.Error())

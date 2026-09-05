@@ -36,11 +36,11 @@ func RegisterBonus() int {
 	return n
 }
 
-// PublishCost is an optional listing fee. Nonprofit default is 0 (以劳换劳).
+// PublishCost is the fixed listing fee deducted on publish (default 5).
 func PublishCost() int {
-	n, err := strconv.Atoi(getenv("PUBLISH_COST", "0"))
+	n, err := strconv.Atoi(getenv("PUBLISH_COST", "5"))
 	if err != nil || n < 0 {
-		return 0
+		return 5
 	}
 	return n
 }

@@ -139,6 +139,19 @@ func (h *SurveyHandler) ListMyCompletions(c *gin.Context) {
 	httpx.OK(c, list)
 }
 
+func (h *SurveyHandler) Stats(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	stats, err := h.surveys.Stats(id, middleware.UserID(c))
+	if err != nil {
+		mapSurveyErr(c, err)
+		return
+	}
+	httpx.OK(c, stats)
+}
+
 func parseID(c *gin.Context) (uint, bool) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -158,7 +171,8 @@ func mapSurveyErr(c *gin.Context, err error) {
 		errors.Is(err, service.ErrSurveyClosed),
 		errors.Is(err, service.ErrBadSurveyInput),
 		errors.Is(err, service.ErrNeedOpenFirst),
-		errors.Is(err, service.ErrAwayTooShort):
+		errors.Is(err, service.ErrAwayTooShort),
+		errors.Is(err, service.ErrProfileMismatch):
 		httpx.Fail(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, service.ErrForbidden):
 		httpx.Fail(c, http.StatusForbidden, err.Error())

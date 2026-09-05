@@ -24,6 +24,7 @@ var (
 	ErrBadSurveyInput   = errors.New("问卷参数不合法")
 	ErrNeedOpenFirst    = errors.New("请先点击「打开问卷」再填写")
 	ErrAwayTooShort     = errors.New("填写时长未达到发布者设置的最低停留时间，暂不能获得积分")
+	ErrProfileMismatch  = errors.New("该问卷未面向你的用户画像（性别/城市）")
 )
 
 type SurveyService struct {
@@ -35,14 +36,17 @@ func NewSurveyService(db *gorm.DB) *SurveyService {
 }
 
 type CreateSurveyInput struct {
-	Title               string `json:"title"`
-	Link                string `json:"link"`
-	Description         string `json:"description"`
-	TargetCount         int    `json:"target_count"`
-	MinFillSeconds      int    `json:"min_fill_seconds"`
-	ExpectedFillSeconds int    `json:"expected_fill_seconds"`
-	BountyCount         int    `json:"bounty_count"`
-	BountyPer           int    `json:"bounty_per"`
+	Title               string   `json:"title"`
+	Link                string   `json:"link"`
+	Description         string   `json:"description"`
+	TargetCount         int      `json:"target_count"`
+	MinFillSeconds      int      `json:"min_fill_seconds"`
+	ExpectedFillSeconds int      `json:"expected_fill_seconds"`
+	BountyCount         int      `json:"bounty_count"`
+	BountyPer           int      `json:"bounty_per"`
+	TargetGenders       []string `json:"target_genders"`
+	TargetRegions       []string `json:"target_regions"`
+	TargetCityTiers     []string `json:"target_city_tiers"`
 }
 
 func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.Survey, error) {
@@ -75,6 +79,19 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 	}
 	if in.BountyCount == 0 {
 		in.BountyPer = 0
+	}
+
+	genders, ok := model.NormalizeGenders(in.TargetGenders)
+	if !ok {
+		return nil, ErrBadSurveyInput
+	}
+	regions, ok := model.NormalizeRegions(in.TargetRegions)
+	if !ok {
+		return nil, ErrBadSurveyInput
+	}
+	tiers, ok := model.NormalizeCityTiers(in.TargetCityTiers)
+	if !ok {
+		return nil, ErrBadSurveyInput
 	}
 
 	listing := config.PublishCost()
@@ -112,6 +129,12 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 			FrozenBounty:        freeze,
 			FilledCount:         0,
 			Status:              model.SurveyStatusOpen,
+			TargetGenders:       genders,
+			TargetGendersRaw:    strings.Join(genders, ","),
+			TargetRegions:       regions,
+			TargetRegionsRaw:    strings.Join(regions, ","),
+			TargetCityTiers:     tiers,
+			TargetCityTiersRaw:  strings.Join(tiers, ","),
 		}
 		return tx.Create(&survey).Error
 	})
@@ -124,14 +147,26 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 }
 
 func (s *SurveyService) ListOpen(viewerID uint) ([]model.Survey, error) {
+	var viewer model.User
+	if err := s.db.First(&viewer, viewerID).Error; err != nil {
+		return nil, err
+	}
+
 	var list []model.Survey
 	q := s.db.Where("status = ?", model.SurveyStatusOpen).Order("id desc")
 	if err := q.Find(&list).Error; err != nil {
 		return nil, err
 	}
-	s.attachPublisherNames(list)
-	s.attachFillStats(list)
-	return list, nil
+
+	filtered := make([]model.Survey, 0, len(list))
+	for _, item := range list {
+		if item.PublisherID == viewerID || item.AllowsUser(&viewer) {
+			filtered = append(filtered, item)
+		}
+	}
+	s.attachPublisherNames(filtered)
+	s.attachFillStats(filtered)
+	return filtered, nil
 }
 
 func (s *SurveyService) ListMine(userID uint) ([]model.Survey, error) {
@@ -181,6 +216,13 @@ func (s *SurveyService) ensureFillable(tx *gorm.DB, surveyID, userID uint) (*mod
 	}
 	if survey.PublisherID == userID {
 		return nil, ErrOwnSurvey
+	}
+	var filler model.User
+	if err := tx.First(&filler, userID).Error; err != nil {
+		return nil, err
+	}
+	if !survey.AllowsUser(&filler) {
+		return nil, ErrProfileMismatch
 	}
 	var existing int64
 	if err := tx.Model(&model.Completion{}).
@@ -544,4 +586,110 @@ func (s *SurveyService) attachFillStats(list []model.Survey) {
 		list[i].EstimatedReward = peak
 		list[i].RewardPoints = peak
 	}
+}
+
+type CompletionDetail struct {
+	UserID      uint      `json:"user_id"`
+	Nickname    string    `json:"nickname"`
+	Gender      string    `json:"gender"`
+	Region      string    `json:"region"`
+	CityTier    string    `json:"city_tier"`
+	School      string    `json:"school"`
+	AwaySeconds int       `json:"away_seconds"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
+type SurveyStats struct {
+	SurveyID       uint               `json:"survey_id"`
+	Title          string             `json:"title"`
+	Status         string             `json:"status"`
+	FilledCount    int                `json:"filled_count"`
+	TargetCount    int                `json:"target_count"`
+	MinFillSeconds int                `json:"min_fill_seconds"`
+	MinAwaySeconds int                `json:"min_away_seconds"`
+	GenderCounts   map[string]int     `json:"gender_counts"`
+	RegionCounts   map[string]int     `json:"region_counts"`
+	CityTierCounts map[string]int     `json:"city_tier_counts"`
+	AvgAwaySeconds float64            `json:"avg_away_seconds"`
+	Completions    []CompletionDetail `json:"completions"`
+}
+
+func (s *SurveyService) Stats(surveyID, requesterID uint) (*SurveyStats, error) {
+	var survey model.Survey
+	if err := s.db.First(&survey, surveyID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if survey.PublisherID != requesterID {
+		return nil, ErrForbidden
+	}
+
+	var completions []model.Completion
+	if err := s.db.Where("survey_id = ?", surveyID).Order("id asc").Find(&completions).Error; err != nil {
+		return nil, err
+	}
+
+	minFill := minFillOf(&survey)
+	stats := &SurveyStats{
+		SurveyID:       survey.ID,
+		Title:          survey.Title,
+		Status:         survey.Status,
+		FilledCount:    survey.FilledCount,
+		TargetCount:    survey.TargetCount,
+		MinFillSeconds: minFill,
+		MinAwaySeconds: minFill,
+		GenderCounts:   map[string]int{},
+		RegionCounts:   map[string]int{},
+		CityTierCounts: map[string]int{},
+		Completions:    make([]CompletionDetail, 0, len(completions)),
+	}
+	if len(completions) == 0 {
+		return stats, nil
+	}
+
+	userIDs := make([]uint, 0, len(completions))
+	for _, c := range completions {
+		userIDs = append(userIDs, c.UserID)
+	}
+	var users []model.User
+	_ = s.db.Where("id IN ?", userIDs).Find(&users)
+	userMap := map[uint]model.User{}
+	for _, u := range users {
+		userMap[u.ID] = u
+	}
+
+	var awaySum int
+	for _, c := range completions {
+		u := userMap[c.UserID]
+		gender := u.Gender
+		if gender == "" {
+			gender = "未知"
+		}
+		region := u.Region
+		if region == "" {
+			region = "未知"
+		}
+		tier := u.CityTier
+		if tier == "" {
+			tier = "未知"
+		}
+		stats.GenderCounts[gender]++
+		stats.RegionCounts[region]++
+		stats.CityTierCounts[tier]++
+		awaySum += c.AwaySeconds
+		stats.Completions = append(stats.Completions, CompletionDetail{
+			UserID:      c.UserID,
+			Nickname:    u.Nickname,
+			Gender:      gender,
+			Region:      region,
+			CityTier:    tier,
+			School:      u.School,
+			AwaySeconds: c.AwaySeconds,
+			CompletedAt: c.CreatedAt,
+		})
+	}
+	stats.AvgAwaySeconds = float64(awaySum) / float64(len(completions))
+	return stats, nil
 }

@@ -37,6 +37,7 @@ func New(db *gorm.DB) *gin.Engine {
 	{
 		api.POST("/auth/register", authH.Register)
 		api.POST("/auth/login", authH.Login)
+		api.GET("/meta/profile-options", handler.ProfileOptions)
 
 		auth := api.Group("")
 		auth.Use(middleware.JWTAuth(config.JWTSecret()))
@@ -45,6 +46,7 @@ func New(db *gorm.DB) *gin.Engine {
 			auth.POST("/surveys", surveyH.Create)
 			auth.GET("/surveys", surveyH.List)
 			auth.GET("/surveys/mine", surveyH.ListMine)
+			auth.GET("/surveys/:id/stats", surveyH.Stats)
 			auth.GET("/surveys/:id", surveyH.Get)
 			auth.POST("/surveys/:id/start", surveyH.Start)
 			auth.POST("/surveys/:id/leave", surveyH.Leave)
