@@ -1,6 +1,11 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+
+	"gorm.io/gorm"
+)
 
 type User struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
@@ -8,6 +13,7 @@ type User struct {
 	PasswordHash string    `gorm:"size:255;not null" json:"-"`
 	Nickname     string    `gorm:"size:64" json:"nickname"`
 	School       string    `gorm:"size:128" json:"school"`
+	DegreeTag    string    `gorm:"size:32;index" json:"degree_tag"`
 	Points       int       `gorm:"not null;default:0" json:"points"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -19,19 +25,47 @@ const (
 )
 
 type Survey struct {
-	ID           uint      `gorm:"primaryKey" json:"id"`
-	PublisherID  uint      `gorm:"index;not null" json:"publisher_id"`
-	Title        string    `gorm:"size:200;not null" json:"title"`
-	Link         string    `gorm:"size:512;not null" json:"link"`
-	Description  string    `gorm:"size:1000" json:"description"`
-	TargetCount  int       `gorm:"not null" json:"target_count"`
-	RewardPoints int       `gorm:"not null" json:"reward_points"`
-	FilledCount  int       `gorm:"not null;default:0" json:"filled_count"`
-	Status       string    `gorm:"size:16;not null;default:open;index" json:"status"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID               uint      `gorm:"primaryKey" json:"id"`
+	PublisherID      uint      `gorm:"index;not null" json:"publisher_id"`
+	Title            string    `gorm:"size:200;not null" json:"title"`
+	Link             string    `gorm:"size:512;not null" json:"link"`
+	Description      string    `gorm:"size:1000" json:"description"`
+	TargetCount      int       `gorm:"not null" json:"target_count"`
+	RewardPoints     int       `gorm:"not null" json:"reward_points"`
+	FilledCount      int       `gorm:"not null;default:0" json:"filled_count"`
+	Status           string    `gorm:"size:16;not null;default:open;index" json:"status"`
+	TargetDegreesRaw string    `gorm:"column:target_degrees;size:512" json:"-"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 
-	PublisherNickname string `gorm:"-" json:"publisher_nickname,omitempty"`
+	TargetDegrees     []string `gorm:"-" json:"target_degrees"`
+	PublisherNickname string   `gorm:"-" json:"publisher_nickname,omitempty"`
+}
+
+func (s *Survey) BeforeSave(tx *gorm.DB) error {
+	raw := strings.Join(s.TargetDegrees, ",")
+	s.TargetDegreesRaw = raw
+	if tx != nil && tx.Statement != nil {
+		tx.Statement.SetColumn("target_degrees", raw)
+	}
+	return nil
+}
+
+func (s *Survey) AfterFind(tx *gorm.DB) error {
+	if strings.TrimSpace(s.TargetDegreesRaw) == "" {
+		s.TargetDegrees = []string{}
+		return nil
+	}
+	parts := strings.Split(s.TargetDegreesRaw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	s.TargetDegrees = out
+	return nil
 }
 
 type Completion struct {
