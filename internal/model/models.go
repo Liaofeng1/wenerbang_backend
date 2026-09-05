@@ -13,6 +13,7 @@ type User struct {
 	PasswordHash string    `gorm:"size:255;not null" json:"-"`
 	Nickname     string    `gorm:"size:64" json:"nickname"`
 	School       string    `gorm:"size:128" json:"school"`
+	Major        string    `gorm:"size:128" json:"major"`
 	Gender       string    `gorm:"size:16;index" json:"gender"`
 	Region       string    `gorm:"size:16;index" json:"region"`
 	CityTier     string    `gorm:"size:32;index" json:"city_tier"`
@@ -29,26 +30,33 @@ const (
 )
 
 type Survey struct {
-	ID                  uint      `gorm:"primaryKey" json:"id"`
-	PublisherID         uint      `gorm:"index;not null" json:"publisher_id"`
-	Title               string    `gorm:"size:200;not null" json:"title"`
-	Link                string    `gorm:"size:512;not null" json:"link"`
-	Description         string    `gorm:"size:1000" json:"description"`
-	TargetCount         int       `gorm:"not null" json:"target_count"`
-	RewardPoints        int       `gorm:"not null" json:"reward_points"`
-	MinFillSeconds      int       `gorm:"not null;default:120" json:"min_fill_seconds"`
-	ExpectedFillSeconds int       `gorm:"not null;default:300" json:"expected_fill_seconds"`
-	BountyCount         int       `gorm:"not null;default:0" json:"bounty_count"`
-	BountyPer           int       `gorm:"not null;default:0" json:"bounty_per"`
-	BountyRemain        int       `gorm:"not null;default:0" json:"bounty_remain"`
-	FrozenBounty        int       `gorm:"not null;default:0" json:"frozen_bounty"`
-	FilledCount         int       `gorm:"not null;default:0" json:"filled_count"`
-	Status              string    `gorm:"size:16;not null;default:open;index" json:"status"`
-	TargetGendersRaw    string    `gorm:"column:target_genders;size:128" json:"-"`
-	TargetRegionsRaw    string    `gorm:"column:target_regions;size:64" json:"-"`
-	TargetCityTiersRaw  string    `gorm:"column:target_city_tiers;size:128" json:"-"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	ID                  uint       `gorm:"primaryKey" json:"id"`
+	PublisherID         uint       `gorm:"index;not null" json:"publisher_id"`
+	Title               string     `gorm:"size:200;not null" json:"title"`
+	Link                string     `gorm:"size:512;not null" json:"link"`
+	Description         string     `gorm:"size:1000" json:"description"`
+	TargetCount         int        `gorm:"not null" json:"target_count"`
+	RewardPoints        int        `gorm:"not null" json:"reward_points"`
+	MinFillSeconds      int        `gorm:"not null;default:120" json:"min_fill_seconds"`
+	ExpectedFillSeconds int        `gorm:"not null;default:300" json:"expected_fill_seconds"`
+	BountyCount         int        `gorm:"not null;default:0" json:"bounty_count"`
+	BountyPer           int        `gorm:"not null;default:0" json:"bounty_per"`
+	BountyRemain        int        `gorm:"not null;default:0" json:"bounty_remain"`
+	FrozenBounty        int        `gorm:"not null;default:0" json:"frozen_bounty"`
+	PinHours            int        `gorm:"not null;default:0" json:"pin_hours"`
+	PinUntil            *time.Time `json:"pin_until,omitempty"`
+	TargetSchool        string     `gorm:"size:128" json:"target_school"`
+	TargetMajor         string     `gorm:"size:128" json:"target_major"`
+	TargetGender        string     `gorm:"size:16" json:"target_gender"`
+	TargetAudienceCount int        `gorm:"not null;default:0" json:"target_audience_count"`
+	TargetingReached    int        `gorm:"not null;default:0" json:"targeting_reached"`
+	FilledCount         int        `gorm:"not null;default:0" json:"filled_count"`
+	Status              string     `gorm:"size:16;not null;default:open;index" json:"status"`
+	TargetGendersRaw    string     `gorm:"column:target_genders;size:128" json:"-"`
+	TargetRegionsRaw    string     `gorm:"column:target_regions;size:64" json:"-"`
+	TargetCityTiersRaw  string     `gorm:"column:target_city_tiers;size:128" json:"-"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 
 	TargetGenders     []string `gorm:"-" json:"target_genders"`
 	TargetRegions     []string `gorm:"-" json:"target_regions"`
@@ -56,6 +64,9 @@ type Survey struct {
 	PublisherNickname string   `gorm:"-" json:"publisher_nickname,omitempty"`
 	AvgFillSeconds    int      `gorm:"-" json:"avg_fill_seconds,omitempty"`
 	EstimatedReward   int      `gorm:"-" json:"estimated_reward,omitempty"`
+	IsPinned          bool     `gorm:"-" json:"is_pinned"`
+	PinByBounty       bool     `gorm:"-" json:"pin_by_bounty"`
+	PinByPaid         bool     `gorm:"-" json:"pin_by_paid"`
 }
 
 func splitCSV(raw string) []string {
@@ -103,7 +114,6 @@ type Completion struct {
 	SurveyTitle string `gorm:"-" json:"survey_title,omitempty"`
 }
 
-// SurveySession tracks open → leave → return for anti-spam timing.
 type SurveySession struct {
 	ID          uint       `gorm:"primaryKey" json:"id"`
 	SurveyID    uint       `gorm:"uniqueIndex:idx_session_user_survey;not null" json:"survey_id"`

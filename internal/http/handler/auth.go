@@ -23,10 +23,11 @@ type registerReq struct {
 	Password   string `json:"password"`
 	Nickname   string `json:"nickname"`
 	School     string `json:"school"`
-	InviteCode string `json:"invite_code"`
+	Major      string `json:"major"`
 	Gender     string `json:"gender"`
 	Region     string `json:"region"`
 	CityTier   string `json:"city_tier"`
+	InviteCode string `json:"invite_code"`
 }
 
 type loginReq struct {
@@ -45,10 +46,11 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		Password:   req.Password,
 		Nickname:   req.Nickname,
 		School:     req.School,
-		InviteCode: req.InviteCode,
+		Major:      req.Major,
 		Gender:     req.Gender,
 		Region:     req.Region,
 		CityTier:   req.CityTier,
+		InviteCode: req.InviteCode,
 	})
 	if err != nil {
 		switch {

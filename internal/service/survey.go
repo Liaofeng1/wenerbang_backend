@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,6 +26,8 @@ var (
 	ErrNeedOpenFirst    = errors.New("请先点击「打开问卷」再填写")
 	ErrAwayTooShort     = errors.New("填写时长未达到发布者设置的最低停留时间，暂不能获得积分")
 	ErrProfileMismatch  = errors.New("该问卷未面向你的用户画像（性别/城市）")
+	ErrAudienceMismatch = errors.New("该问卷定向投放，与你的画像不符")
+	ErrDeliveryFull     = errors.New("该定向问卷投放名额已满")
 )
 
 type SurveyService struct {
@@ -44,15 +47,27 @@ type CreateSurveyInput struct {
 	ExpectedFillSeconds int      `json:"expected_fill_seconds"`
 	BountyCount         int      `json:"bounty_count"`
 	BountyPer           int      `json:"bounty_per"`
+	PinHours            int      `json:"pin_hours"`
+	TargetSchool        string   `json:"target_school"`
+	TargetMajor         string   `json:"target_major"`
+	TargetGender        string   `json:"target_gender"`
+	TargetAudienceCount int      `json:"target_audience_count"`
 	TargetGenders       []string `json:"target_genders"`
 	TargetRegions       []string `json:"target_regions"`
 	TargetCityTiers     []string `json:"target_city_tiers"`
+}
+
+func validPinHours(h int) bool {
+	return h == 0 || h == 4 || h == 6 || h == 8
 }
 
 func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.Survey, error) {
 	in.Title = strings.TrimSpace(in.Title)
 	in.Link = strings.TrimSpace(in.Link)
 	in.Description = strings.TrimSpace(in.Description)
+	in.TargetSchool = strings.TrimSpace(in.TargetSchool)
+	in.TargetMajor = strings.TrimSpace(in.TargetMajor)
+	in.TargetGender = strings.TrimSpace(in.TargetGender)
 	if in.Title == "" || in.Link == "" || in.TargetCount <= 0 {
 		return nil, ErrBadSurveyInput
 	}
@@ -68,17 +83,38 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 	if in.ExpectedFillSeconds < in.MinFillSeconds || in.ExpectedFillSeconds > 7200 {
 		return nil, ErrBadSurveyInput
 	}
-	if in.BountyCount < 0 || in.BountyPer < 0 {
+	if !validPinHours(in.PinHours) {
 		return nil, ErrBadSurveyInput
 	}
-	if in.BountyCount > in.TargetCount {
-		in.BountyCount = in.TargetCount
-	}
-	if in.BountyCount > 0 && in.BountyPer <= 0 {
+
+	// Bounty: optional; if on → min 50 slots, min 10 pts each (§3.2.2)
+	if in.BountyCount < 0 || in.BountyPer < 0 {
 		return nil, ErrBadSurveyInput
 	}
 	if in.BountyCount == 0 {
 		in.BountyPer = 0
+	} else {
+		if in.BountyCount < config.BountyMinCount() || in.BountyPer < config.BountyMinPer() {
+			return nil, ErrBadSurveyInput
+		}
+	}
+
+	if in.TargetMajor != "" && !validDiscipline(in.TargetMajor) {
+		return nil, ErrBadSurveyInput
+	}
+	if in.TargetGender != "" && !model.IsValidGender(in.TargetGender) {
+		return nil, ErrBadSurveyInput
+	}
+
+	hasTargetFilter := in.TargetSchool != "" || in.TargetMajor != "" || in.TargetGender != ""
+	if in.TargetAudienceCount < 0 {
+		return nil, ErrBadSurveyInput
+	}
+	if hasTargetFilter && in.TargetAudienceCount <= 0 {
+		return nil, ErrBadSurveyInput
+	}
+	if in.TargetAudienceCount > 0 && !hasTargetFilter {
+		return nil, ErrBadSurveyInput
 	}
 
 	genders, ok := model.NormalizeGenders(in.TargetGenders)
@@ -95,9 +131,17 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 	}
 
 	listing := config.PublishCost()
-	freeze := in.BountyCount * in.BountyPer
-	need := listing + freeze
+	bountyFreeze := in.BountyCount * in.BountyPer
+	pinCost := in.PinHours * config.PinHourlyCost()
+	targetingCost := in.TargetAudienceCount * config.TargetingCostPerUser()
+	need := listing + bountyFreeze + pinCost + targetingCost
 	peak := points.PeakReward(in.ExpectedFillSeconds)
+
+	var pinUntil *time.Time
+	if in.PinHours > 0 {
+		t := time.Now().Add(time.Duration(in.PinHours) * time.Hour)
+		pinUntil = &t
+	}
 
 	var survey model.Survey
 	err := s.db.Transaction(func(tx *gorm.DB) error {
@@ -108,11 +152,9 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 		if user.Points < need {
 			return ErrInsufficientPts
 		}
-		if need > 0 {
-			user.Points -= need
-			if err := tx.Save(&user).Error; err != nil {
-				return err
-			}
+		user.Points -= need
+		if err := tx.Save(&user).Error; err != nil {
+			return err
 		}
 		survey = model.Survey{
 			PublisherID:         publisherID,
@@ -126,7 +168,14 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 			BountyCount:         in.BountyCount,
 			BountyPer:           in.BountyPer,
 			BountyRemain:        in.BountyCount,
-			FrozenBounty:        freeze,
+			FrozenBounty:        bountyFreeze,
+			PinHours:            in.PinHours,
+			PinUntil:            pinUntil,
+			TargetSchool:        in.TargetSchool,
+			TargetMajor:         in.TargetMajor,
+			TargetGender:        in.TargetGender,
+			TargetAudienceCount: in.TargetAudienceCount,
+			TargetingReached:    0,
 			FilledCount:         0,
 			Status:              model.SurveyStatusOpen,
 			TargetGenders:       genders,
@@ -143,6 +192,7 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 	}
 	survey.EstimatedReward = peak
 	survey.AvgFillSeconds = in.ExpectedFillSeconds
+	attachPinFlags([]*model.Survey{&survey})
 	return &survey, nil
 }
 
@@ -153,17 +203,35 @@ func (s *SurveyService) ListOpen(viewerID uint) ([]model.Survey, error) {
 	}
 
 	var list []model.Survey
-	q := s.db.Where("status = ?", model.SurveyStatusOpen).Order("id desc")
-	if err := q.Find(&list).Error; err != nil {
+	if err := s.db.Where("status = ?", model.SurveyStatusOpen).Find(&list).Error; err != nil {
 		return nil, err
 	}
 
 	filtered := make([]model.Survey, 0, len(list))
-	for _, item := range list {
-		if item.PublisherID == viewerID || item.AllowsUser(&viewer) {
-			filtered = append(filtered, item)
+	for i := range list {
+		sv := &list[i]
+		if sv.PublisherID == viewerID {
+			filtered = append(filtered, *sv)
+			continue
 		}
+		if !sv.AllowsUser(&viewer) {
+			continue
+		}
+		if !targetingVisible(sv, &viewer) {
+			continue
+		}
+		if targetingFull(sv) {
+			continue
+		}
+		filtered = append(filtered, *sv)
 	}
+	attachPinFlagsPtr(filtered)
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if filtered[i].IsPinned != filtered[j].IsPinned {
+			return filtered[i].IsPinned
+		}
+		return filtered[i].ID > filtered[j].ID
+	})
 	s.attachPublisherNames(filtered)
 	s.attachFillStats(filtered)
 	return filtered, nil
@@ -174,6 +242,7 @@ func (s *SurveyService) ListMine(userID uint) ([]model.Survey, error) {
 	if err := s.db.Where("publisher_id = ?", userID).Order("id desc").Find(&list).Error; err != nil {
 		return nil, err
 	}
+	attachPinFlagsPtr(list)
 	s.attachFillStats(list)
 	return list, nil
 }
@@ -192,6 +261,7 @@ func (s *SurveyService) Get(id uint) (*model.Survey, error) {
 	}
 	tmp := []model.Survey{survey}
 	s.attachFillStats(tmp)
+	attachPinFlagsPtr(tmp)
 	survey = tmp[0]
 	return &survey, nil
 }
@@ -201,6 +271,62 @@ type SessionView struct {
 	AwaySeconds    int  `json:"away_seconds"`
 	MinAwaySeconds int  `json:"min_away_seconds"`
 	Ready          bool `json:"ready"`
+}
+
+func targetingEnabled(sv *model.Survey) bool {
+	return sv.TargetAudienceCount > 0
+}
+
+func targetingFull(sv *model.Survey) bool {
+	if !targetingEnabled(sv) {
+		return false
+	}
+	capN := sv.TargetAudienceCount * config.TargetingDeliveryMult()
+	return sv.TargetingReached >= capN
+}
+
+func userMatchesTarget(sv *model.Survey, u *model.User) bool {
+	if sv.TargetSchool != "" && !strings.EqualFold(strings.TrimSpace(u.School), sv.TargetSchool) {
+		return false
+	}
+	if sv.TargetMajor != "" && !strings.EqualFold(strings.TrimSpace(u.Major), sv.TargetMajor) {
+		return false
+	}
+	if sv.TargetGender != "" && !strings.EqualFold(strings.TrimSpace(u.Gender), sv.TargetGender) {
+		return false
+	}
+	return true
+}
+
+func targetingVisible(sv *model.Survey, u *model.User) bool {
+	if !targetingEnabled(sv) {
+		return true
+	}
+	return userMatchesTarget(sv, u)
+}
+
+func paidPinActive(sv *model.Survey) bool {
+	return sv.PinUntil != nil && sv.PinUntil.After(time.Now())
+}
+
+func bountyPinActive(sv *model.Survey) bool {
+	return sv.BountyRemain > 0 && sv.BountyPer > 0
+}
+
+func attachPinFlags(list []*model.Survey) {
+	for _, sv := range list {
+		sv.PinByBounty = bountyPinActive(sv)
+		sv.PinByPaid = paidPinActive(sv)
+		sv.IsPinned = sv.PinByBounty || sv.PinByPaid
+	}
+}
+
+func attachPinFlagsPtr(list []model.Survey) {
+	for i := range list {
+		list[i].PinByBounty = bountyPinActive(&list[i])
+		list[i].PinByPaid = paidPinActive(&list[i])
+		list[i].IsPinned = list[i].PinByBounty || list[i].PinByPaid
+	}
 }
 
 func (s *SurveyService) ensureFillable(tx *gorm.DB, surveyID, userID uint) (*model.Survey, error) {
@@ -217,13 +343,7 @@ func (s *SurveyService) ensureFillable(tx *gorm.DB, surveyID, userID uint) (*mod
 	if survey.PublisherID == userID {
 		return nil, ErrOwnSurvey
 	}
-	var filler model.User
-	if err := tx.First(&filler, userID).Error; err != nil {
-		return nil, err
-	}
-	if !survey.AllowsUser(&filler) {
-		return nil, ErrProfileMismatch
-	}
+
 	var existing int64
 	if err := tx.Model(&model.Completion{}).
 		Where("survey_id = ? AND user_id = ?", surveyID, userID).
@@ -232,6 +352,22 @@ func (s *SurveyService) ensureFillable(tx *gorm.DB, surveyID, userID uint) (*mod
 	}
 	if existing > 0 {
 		return nil, ErrAlreadyCompleted
+	}
+
+	var user model.User
+	if err := tx.First(&user, userID).Error; err != nil {
+		return nil, err
+	}
+	if !survey.AllowsUser(&user) {
+		return nil, ErrProfileMismatch
+	}
+	if targetingEnabled(&survey) {
+		if !userMatchesTarget(&survey, &user) {
+			return nil, ErrAudienceMismatch
+		}
+		if targetingFull(&survey) {
+			return nil, ErrDeliveryFull
+		}
 	}
 	return &survey, nil
 }
@@ -454,6 +590,10 @@ func (s *SurveyService) Complete(surveyID, userID uint) (*model.Completion, erro
 			return err
 		}
 
+		if targetingEnabled(survey) && userMatchesTarget(survey, &filler) {
+			survey.TargetingReached++
+		}
+
 		survey.FilledCount++
 		if survey.FilledCount >= survey.TargetCount {
 			survey.Status = model.SurveyStatusClosed
@@ -595,6 +735,7 @@ type CompletionDetail struct {
 	Region      string    `json:"region"`
 	CityTier    string    `json:"city_tier"`
 	School      string    `json:"school"`
+	Major       string    `json:"major"`
 	AwaySeconds int       `json:"away_seconds"`
 	CompletedAt time.Time `json:"completed_at"`
 }
@@ -686,6 +827,7 @@ func (s *SurveyService) Stats(surveyID, requesterID uint) (*SurveyStats, error) 
 			Region:      region,
 			CityTier:    tier,
 			School:      u.School,
+			Major:       u.Major,
 			AwaySeconds: c.AwaySeconds,
 			CompletedAt: c.CreatedAt,
 		})

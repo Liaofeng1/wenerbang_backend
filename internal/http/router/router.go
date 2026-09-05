@@ -43,6 +43,8 @@ func New(db *gorm.DB) *gin.Engine {
 		auth.Use(middleware.JWTAuth(config.JWTSecret()))
 		{
 			auth.GET("/me", meH.Me)
+			auth.PATCH("/me", meH.Update)
+			auth.PUT("/me", meH.Update)
 			auth.POST("/surveys", surveyH.Create)
 			auth.GET("/surveys", surveyH.List)
 			auth.GET("/surveys/mine", surveyH.ListMine)

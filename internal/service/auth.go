@@ -43,16 +43,18 @@ type RegisterInput struct {
 	Password   string
 	Nickname   string
 	School     string
-	InviteCode string
+	Major      string
 	Gender     string
 	Region     string
 	CityTier   string
+	InviteCode string
 }
 
 func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 	username := strings.TrimSpace(in.Username)
 	password := strings.TrimSpace(in.Password)
 	school := strings.TrimSpace(in.School)
+	major := strings.TrimSpace(in.Major)
 	inviteCode := strings.ToUpper(strings.TrimSpace(in.InviteCode))
 	gender := strings.TrimSpace(in.Gender)
 	region := strings.TrimSpace(in.Region)
@@ -65,6 +67,9 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 	}
 	if !model.IsValidGender(gender) || !model.IsValidRegion(region) || !model.IsValidCityTier(cityTier) {
 		return nil, ErrInvalidProfile
+	}
+	if major != "" && !validDiscipline(major) {
+		return nil, errors.New("专业请选择学术型学科门类")
 	}
 	if school == "" {
 		school = "中国人民大学"
@@ -106,11 +111,11 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 			return err
 		}
 
-		points := config.RegisterBonus()
+		pts := config.RegisterBonus()
 		reward := config.InviteReward()
 		var invitedBy *uint
 		if inviter != nil {
-			points += reward
+			pts += reward
 			id := inviter.ID
 			invitedBy = &id
 		}
@@ -120,12 +125,13 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 			PasswordHash: string(hash),
 			Nickname:     nickname,
 			School:       school,
+			Major:        major,
 			Gender:       gender,
 			Region:       region,
 			CityTier:     cityTier,
 			InviteCode:   code,
 			InvitedByID:  invitedBy,
-			Points:       points,
+			Points:       pts,
 		}
 		if err := tx.Create(user).Error; err != nil {
 			return err
@@ -175,6 +181,74 @@ func (s *AuthService) GetUser(id uint) (*model.User, error) {
 		return nil, err
 	}
 	return &user, nil
+}
+
+type UpdateProfileInput struct {
+	Nickname string `json:"nickname"`
+	School   string `json:"school"`
+	Major    string `json:"major"`
+	Gender   string `json:"gender"`
+	Region   string `json:"region"`
+	CityTier string `json:"city_tier"`
+}
+
+func (s *AuthService) UpdateProfile(userID uint, in UpdateProfileInput) (*model.User, error) {
+	in.Nickname = strings.TrimSpace(in.Nickname)
+	in.School = strings.TrimSpace(in.School)
+	in.Major = strings.TrimSpace(in.Major)
+	in.Gender = strings.TrimSpace(in.Gender)
+	in.Region = strings.TrimSpace(in.Region)
+	in.CityTier = strings.TrimSpace(in.CityTier)
+
+	if in.Gender != "" && !model.IsValidGender(in.Gender) {
+		return nil, errors.New("性别请选择：男 / 女 / 不便透露")
+	}
+	if in.Region != "" && !model.IsValidRegion(in.Region) {
+		return nil, errors.New("南北方请选择：北方 / 南方")
+	}
+	if in.CityTier != "" && !model.IsValidCityTier(in.CityTier) {
+		return nil, errors.New("城市线级不合法")
+	}
+
+	var user model.User
+	if err := s.db.First(&user, userID).Error; err != nil {
+		return nil, err
+	}
+	if in.Major != "" && !validDiscipline(in.Major) && in.Major != user.Major {
+		return nil, errors.New("专业请选择学术型学科门类")
+	}
+	if in.School == "" {
+		in.School = "中国人民大学"
+	}
+	if in.Nickname == "" {
+		in.Nickname = user.Username
+	}
+	user.Nickname = in.Nickname
+	user.School = in.School
+	user.Major = in.Major
+	if in.Gender != "" {
+		user.Gender = in.Gender
+	}
+	if in.Region != "" {
+		user.Region = in.Region
+	}
+	if in.CityTier != "" {
+		user.CityTier = in.CityTier
+	}
+	if err := s.db.Save(&user).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+var academicDisciplines = map[string]struct{}{
+	"哲学": {}, "经济学": {}, "法学": {}, "教育学": {}, "文学": {}, "历史学": {},
+	"理学": {}, "工学": {}, "农学": {}, "医学": {}, "军事学": {}, "管理学": {}, "艺术学": {},
+}
+
+func validDiscipline(major string) bool {
+	_, ok := academicDisciplines[major]
+	return ok
 }
 
 func (s *AuthService) ensureInviteCode(user *model.User) error {

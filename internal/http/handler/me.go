@@ -26,3 +26,17 @@ func (h *MeHandler) Me(c *gin.Context) {
 	}
 	httpx.OK(c, user)
 }
+
+func (h *MeHandler) Update(c *gin.Context) {
+	var req service.UpdateProfileInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.Fail(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	user, err := h.auth.UpdateProfile(middleware.UserID(c), req)
+	if err != nil {
+		httpx.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpx.OK(c, user)
+}

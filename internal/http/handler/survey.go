@@ -172,7 +172,9 @@ func mapSurveyErr(c *gin.Context, err error) {
 		errors.Is(err, service.ErrBadSurveyInput),
 		errors.Is(err, service.ErrNeedOpenFirst),
 		errors.Is(err, service.ErrAwayTooShort),
-		errors.Is(err, service.ErrProfileMismatch):
+		errors.Is(err, service.ErrProfileMismatch),
+		errors.Is(err, service.ErrAudienceMismatch),
+		errors.Is(err, service.ErrDeliveryFull):
 		httpx.Fail(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, service.ErrForbidden):
 		httpx.Fail(c, http.StatusForbidden, err.Error())
