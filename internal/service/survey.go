@@ -1,7 +1,9 @@
 package service
 
 import (
+	"database/sql"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 
 	"wenbang/internal/config"
 	"wenbang/internal/model"
+	"wenbang/internal/points"
 )
 
 var (
@@ -20,8 +23,7 @@ var (
 	ErrSurveyClosed     = errors.New("问卷已结束")
 	ErrBadSurveyInput   = errors.New("问卷参数不合法")
 	ErrNeedOpenFirst    = errors.New("请先点击「打开问卷」再填写")
-	ErrAwayTooShort     = errors.New("离开填写时间过短，请认真作答后再提交")
-	ErrDegreeMismatch   = errors.New("该问卷未面向你的学位类别")
+	ErrAwayTooShort     = errors.New("填写时长未达到发布者设置的最低停留时间，暂不能获得积分")
 )
 
 type SurveyService struct {
@@ -33,26 +35,52 @@ func NewSurveyService(db *gorm.DB) *SurveyService {
 }
 
 type CreateSurveyInput struct {
-	Title         string   `json:"title"`
-	Link          string   `json:"link"`
-	Description   string   `json:"description"`
-	TargetCount   int      `json:"target_count"`
-	RewardPoints  int      `json:"reward_points"`
-	TargetDegrees []string `json:"target_degrees"`
+	Title               string `json:"title"`
+	Link                string `json:"link"`
+	Description         string `json:"description"`
+	TargetCount         int    `json:"target_count"`
+	MinFillSeconds      int    `json:"min_fill_seconds"`
+	ExpectedFillSeconds int    `json:"expected_fill_seconds"`
+	BountyCount         int    `json:"bounty_count"`
+	BountyPer           int    `json:"bounty_per"`
 }
 
 func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.Survey, error) {
 	in.Title = strings.TrimSpace(in.Title)
 	in.Link = strings.TrimSpace(in.Link)
 	in.Description = strings.TrimSpace(in.Description)
-	if in.Title == "" || in.Link == "" || in.TargetCount <= 0 || in.RewardPoints <= 0 {
+	if in.Title == "" || in.Link == "" || in.TargetCount <= 0 {
 		return nil, ErrBadSurveyInput
 	}
-	targets, ok := model.NormalizeDegreeTags(in.TargetDegrees)
-	if !ok {
+	if in.MinFillSeconds <= 0 {
+		in.MinFillSeconds = points.DefaultTmin
+	}
+	if in.ExpectedFillSeconds <= 0 {
+		in.ExpectedFillSeconds = points.DefaultTavg
+	}
+	if in.MinFillSeconds < 10 || in.MinFillSeconds > 7200 {
 		return nil, ErrBadSurveyInput
 	}
-	cost := config.PublishCost() // fixed publish cost (default 5)
+	if in.ExpectedFillSeconds < in.MinFillSeconds || in.ExpectedFillSeconds > 7200 {
+		return nil, ErrBadSurveyInput
+	}
+	if in.BountyCount < 0 || in.BountyPer < 0 {
+		return nil, ErrBadSurveyInput
+	}
+	if in.BountyCount > in.TargetCount {
+		in.BountyCount = in.TargetCount
+	}
+	if in.BountyCount > 0 && in.BountyPer <= 0 {
+		return nil, ErrBadSurveyInput
+	}
+	if in.BountyCount == 0 {
+		in.BountyPer = 0
+	}
+
+	listing := config.PublishCost()
+	freeze := in.BountyCount * in.BountyPer
+	need := listing + freeze
+	peak := points.PeakReward(in.ExpectedFillSeconds)
 
 	var survey model.Survey
 	err := s.db.Transaction(func(tx *gorm.DB) error {
@@ -60,54 +88,50 @@ func (s *SurveyService) Create(publisherID uint, in CreateSurveyInput) (*model.S
 		if err := tx.First(&user, publisherID).Error; err != nil {
 			return err
 		}
-		if user.Points < cost {
+		if user.Points < need {
 			return ErrInsufficientPts
 		}
-		user.Points -= cost
-		if err := tx.Save(&user).Error; err != nil {
-			return err
+		if need > 0 {
+			user.Points -= need
+			if err := tx.Save(&user).Error; err != nil {
+				return err
+			}
 		}
 		survey = model.Survey{
-			PublisherID:      publisherID,
-			Title:            in.Title,
-			Link:             in.Link,
-			Description:      in.Description,
-			TargetCount:      in.TargetCount,
-			RewardPoints:     in.RewardPoints,
-			FilledCount:      0,
-			Status:           model.SurveyStatusOpen,
-			TargetDegrees:    targets,
-			TargetDegreesRaw: strings.Join(targets, ","),
+			PublisherID:         publisherID,
+			Title:               in.Title,
+			Link:                in.Link,
+			Description:         in.Description,
+			TargetCount:         in.TargetCount,
+			RewardPoints:        peak,
+			MinFillSeconds:      in.MinFillSeconds,
+			ExpectedFillSeconds: in.ExpectedFillSeconds,
+			BountyCount:         in.BountyCount,
+			BountyPer:           in.BountyPer,
+			BountyRemain:        in.BountyCount,
+			FrozenBounty:        freeze,
+			FilledCount:         0,
+			Status:              model.SurveyStatusOpen,
 		}
 		return tx.Create(&survey).Error
 	})
 	if err != nil {
 		return nil, err
 	}
+	survey.EstimatedReward = peak
+	survey.AvgFillSeconds = in.ExpectedFillSeconds
 	return &survey, nil
 }
 
 func (s *SurveyService) ListOpen(viewerID uint) ([]model.Survey, error) {
-	var viewer model.User
-	if err := s.db.Select("id, degree_tag").First(&viewer, viewerID).Error; err != nil {
-		return nil, err
-	}
-
 	var list []model.Survey
 	q := s.db.Where("status = ?", model.SurveyStatusOpen).Order("id desc")
 	if err := q.Find(&list).Error; err != nil {
 		return nil, err
 	}
-
-	filtered := make([]model.Survey, 0, len(list))
-	for _, item := range list {
-		// Always show own surveys; otherwise require degree match (empty target = all).
-		if item.PublisherID == viewerID || item.AllowsDegree(viewer.DegreeTag) {
-			filtered = append(filtered, item)
-		}
-	}
-	s.attachPublisherNames(filtered)
-	return filtered, nil
+	s.attachPublisherNames(list)
+	s.attachFillStats(list)
+	return list, nil
 }
 
 func (s *SurveyService) ListMine(userID uint) ([]model.Survey, error) {
@@ -115,6 +139,7 @@ func (s *SurveyService) ListMine(userID uint) ([]model.Survey, error) {
 	if err := s.db.Where("publisher_id = ?", userID).Order("id desc").Find(&list).Error; err != nil {
 		return nil, err
 	}
+	s.attachFillStats(list)
 	return list, nil
 }
 
@@ -126,11 +151,13 @@ func (s *SurveyService) Get(id uint) (*model.Survey, error) {
 		}
 		return nil, err
 	}
-	s.attachPublisherNames([]model.Survey{survey})
 	var pub model.User
 	if err := s.db.Select("nickname").First(&pub, survey.PublisherID).Error; err == nil {
 		survey.PublisherNickname = pub.Nickname
 	}
+	tmp := []model.Survey{survey}
+	s.attachFillStats(tmp)
+	survey = tmp[0]
 	return &survey, nil
 }
 
@@ -155,13 +182,6 @@ func (s *SurveyService) ensureFillable(tx *gorm.DB, surveyID, userID uint) (*mod
 	if survey.PublisherID == userID {
 		return nil, ErrOwnSurvey
 	}
-	var filler model.User
-	if err := tx.Select("id, degree_tag").First(&filler, userID).Error; err != nil {
-		return nil, err
-	}
-	if !survey.AllowsDegree(filler.DegreeTag) {
-		return nil, ErrDegreeMismatch
-	}
 	var existing int64
 	if err := tx.Model(&model.Completion{}).
 		Where("survey_id = ? AND user_id = ?", surveyID, userID).
@@ -174,15 +194,27 @@ func (s *SurveyService) ensureFillable(tx *gorm.DB, surveyID, userID uint) (*mod
 	return &survey, nil
 }
 
+func minFillOf(survey *model.Survey) int {
+	if survey != nil && survey.MinFillSeconds > 0 {
+		return survey.MinFillSeconds
+	}
+	n := config.MinAwaySeconds()
+	if n <= 0 {
+		return points.DefaultTmin
+	}
+	return n
+}
+
 func (s *SurveyService) Start(surveyID, userID uint) (*SessionView, error) {
 	var view SessionView
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if _, err := s.ensureFillable(tx, surveyID, userID); err != nil {
+		survey, err := s.ensureFillable(tx, surveyID, userID)
+		if err != nil {
 			return err
 		}
 		now := time.Now()
 		var session model.SurveySession
-		err := tx.Where("survey_id = ? AND user_id = ?", surveyID, userID).First(&session).Error
+		err = tx.Where("survey_id = ? AND user_id = ?", surveyID, userID).First(&session).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			session = model.SurveySession{
 				SurveyID:  surveyID,
@@ -195,13 +227,12 @@ func (s *SurveyService) Start(surveyID, userID uint) (*SessionView, error) {
 		} else if err != nil {
 			return err
 		} else {
-			// reopen: keep accumulated away, clear in-progress leave
 			session.LeftAt = nil
 			if err := tx.Save(&session).Error; err != nil {
 				return err
 			}
 		}
-		view = toSessionView(&session)
+		view = toSessionView(&session, minFillOf(survey))
 		return nil
 	})
 	if err != nil {
@@ -213,7 +244,8 @@ func (s *SurveyService) Start(surveyID, userID uint) (*SessionView, error) {
 func (s *SurveyService) Leave(surveyID, userID uint) (*SessionView, error) {
 	var view SessionView
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if _, err := s.ensureFillable(tx, surveyID, userID); err != nil {
+		survey, err := s.ensureFillable(tx, surveyID, userID)
+		if err != nil {
 			return err
 		}
 		var session model.SurveySession
@@ -230,7 +262,7 @@ func (s *SurveyService) Leave(surveyID, userID uint) (*SessionView, error) {
 				return err
 			}
 		}
-		view = toSessionView(&session)
+		view = toSessionView(&session, minFillOf(survey))
 		return nil
 	})
 	if err != nil {
@@ -242,7 +274,8 @@ func (s *SurveyService) Leave(surveyID, userID uint) (*SessionView, error) {
 func (s *SurveyService) Return(surveyID, userID uint) (*SessionView, error) {
 	var view SessionView
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if _, err := s.ensureFillable(tx, surveyID, userID); err != nil {
+		survey, err := s.ensureFillable(tx, surveyID, userID)
+		if err != nil {
 			return err
 		}
 		var session model.SurveySession
@@ -265,7 +298,7 @@ func (s *SurveyService) Return(surveyID, userID uint) (*SessionView, error) {
 				return err
 			}
 		}
-		view = toSessionView(&session)
+		view = toSessionView(&session, minFillOf(survey))
 		return nil
 	})
 	if err != nil {
@@ -275,23 +308,31 @@ func (s *SurveyService) Return(surveyID, userID uint) (*SessionView, error) {
 }
 
 func (s *SurveyService) GetSession(surveyID, userID uint) (*SessionView, error) {
+	var survey model.Survey
+	if err := s.db.First(&survey, surveyID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	minAway := minFillOf(&survey)
 	var session model.SurveySession
 	if err := s.db.Where("survey_id = ? AND user_id = ?", surveyID, userID).First(&session).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return &SessionView{
 				SurveyID:       surveyID,
 				AwaySeconds:    0,
-				MinAwaySeconds: config.MinAwaySeconds(),
+				MinAwaySeconds: minAway,
 				Ready:          false,
 			}, nil
 		}
 		return nil, err
 	}
-	view := toSessionView(&session)
+	view := toSessionView(&session, minAway)
 	return &view, nil
 }
 
-func toSessionView(session *model.SurveySession) SessionView {
+func toSessionView(session *model.SurveySession, minAway int) SessionView {
 	away := session.AwaySeconds
 	if session.LeftAt != nil {
 		delta := int(time.Since(*session.LeftAt).Seconds())
@@ -299,7 +340,9 @@ func toSessionView(session *model.SurveySession) SessionView {
 			away += delta
 		}
 	}
-	minAway := config.MinAwaySeconds()
+	if minAway <= 0 {
+		minAway = points.DefaultTmin
+	}
 	return SessionView{
 		SurveyID:       session.SurveyID,
 		AwaySeconds:    away,
@@ -323,7 +366,6 @@ func (s *SurveyService) Complete(surveyID, userID uint) (*model.Completion, erro
 			}
 			return err
 		}
-		// If still away, close the leave interval now.
 		if session.LeftAt != nil {
 			now := time.Now()
 			delta := int(now.Sub(*session.LeftAt).Seconds())
@@ -333,15 +375,29 @@ func (s *SurveyService) Complete(surveyID, userID uint) (*model.Completion, erro
 			session.LeftAt = nil
 			session.ReturnedAt = &now
 		}
-		if session.AwaySeconds < config.MinAwaySeconds() {
+		minFill := minFillOf(survey)
+		if session.AwaySeconds < minFill {
 			return ErrAwayTooShort
+		}
+
+		avg := avgFillSeconds(tx, surveyID, survey.ExpectedFillSeconds)
+		base := points.FillReward(session.AwaySeconds, avg, minFill)
+		bounty := 0
+		if survey.BountyRemain > 0 && survey.BountyPer > 0 {
+			bounty = survey.BountyPer
+			survey.BountyRemain--
+			survey.FrozenBounty -= bounty
+			if survey.FrozenBounty < 0 {
+				survey.FrozenBounty = 0
+			}
 		}
 
 		var filler model.User
 		if err := tx.First(&filler, userID).Error; err != nil {
 			return err
 		}
-		filler.Points += survey.RewardPoints
+		earned := base + bounty
+		filler.Points += earned
 		if err := tx.Save(&filler).Error; err != nil {
 			return err
 		}
@@ -349,7 +405,7 @@ func (s *SurveyService) Complete(surveyID, userID uint) (*model.Completion, erro
 		completion = model.Completion{
 			SurveyID:     surveyID,
 			UserID:       userID,
-			PointsEarned: survey.RewardPoints,
+			PointsEarned: earned,
 			AwaySeconds:  session.AwaySeconds,
 		}
 		if err := tx.Create(&completion).Error; err != nil {
@@ -359,6 +415,9 @@ func (s *SurveyService) Complete(surveyID, userID uint) (*model.Completion, erro
 		survey.FilledCount++
 		if survey.FilledCount >= survey.TargetCount {
 			survey.Status = model.SurveyStatusClosed
+			if err := refundFrozenBounty(tx, survey); err != nil {
+				return err
+			}
 		}
 		if err := tx.Save(survey).Error; err != nil {
 			return err
@@ -369,6 +428,35 @@ func (s *SurveyService) Complete(surveyID, userID uint) (*model.Completion, erro
 		return nil, err
 	}
 	return &completion, nil
+}
+
+func refundFrozenBounty(tx *gorm.DB, survey *model.Survey) error {
+	if survey.FrozenBounty <= 0 {
+		survey.BountyRemain = 0
+		return nil
+	}
+	if err := tx.Model(&model.User{}).
+		Where("id = ?", survey.PublisherID).
+		Update("points", gorm.Expr("points + ?", survey.FrozenBounty)).Error; err != nil {
+		return err
+	}
+	survey.FrozenBounty = 0
+	survey.BountyRemain = 0
+	return nil
+}
+
+func avgFillSeconds(tx *gorm.DB, surveyID uint, fallback int) int {
+	if fallback <= 0 {
+		fallback = points.DefaultTavg
+	}
+	var avg sql.NullFloat64
+	if err := tx.Model(&model.Completion{}).
+		Where("survey_id = ?", surveyID).
+		Select("AVG(away_seconds)").
+		Scan(&avg).Error; err != nil || !avg.Valid || avg.Float64 <= 0 {
+		return fallback
+	}
+	return int(math.Round(avg.Float64))
 }
 
 func (s *SurveyService) ListMyCompletions(userID uint) ([]model.Completion, error) {
@@ -416,5 +504,44 @@ func (s *SurveyService) attachPublisherNames(list []model.Survey) {
 	}
 	for i := range list {
 		list[i].PublisherNickname = nameMap[list[i].PublisherID]
+	}
+}
+
+func (s *SurveyService) attachFillStats(list []model.Survey) {
+	if len(list) == 0 {
+		return
+	}
+	ids := make([]uint, 0, len(list))
+	for _, item := range list {
+		ids = append(ids, item.ID)
+	}
+	type row struct {
+		SurveyID uint
+		AvgAway  float64
+	}
+	var rows []row
+	_ = s.db.Model(&model.Completion{}).
+		Select("survey_id, AVG(away_seconds) as avg_away").
+		Where("survey_id IN ?", ids).
+		Group("survey_id").
+		Scan(&rows)
+	avgMap := map[uint]int{}
+	for _, r := range rows {
+		if r.AvgAway > 0 {
+			avgMap[r.SurveyID] = int(math.Round(r.AvgAway))
+		}
+	}
+	for i := range list {
+		avg := list[i].ExpectedFillSeconds
+		if avg <= 0 {
+			avg = points.DefaultTavg
+		}
+		if v, ok := avgMap[list[i].ID]; ok && v > 0 {
+			avg = v
+		}
+		peak := points.PeakReward(avg)
+		list[i].AvgFillSeconds = avg
+		list[i].EstimatedReward = peak
+		list[i].RewardPoints = peak
 	}
 }

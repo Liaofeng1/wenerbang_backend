@@ -37,7 +37,6 @@ func New(db *gorm.DB) *gin.Engine {
 	{
 		api.POST("/auth/register", authH.Register)
 		api.POST("/auth/login", authH.Login)
-		api.GET("/meta/degree-tags", handler.DegreeTags)
 
 		auth := api.Group("")
 		auth.Use(middleware.JWTAuth(config.JWTSecret()))
