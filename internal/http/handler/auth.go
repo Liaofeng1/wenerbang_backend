@@ -19,10 +19,11 @@ func NewAuthHandler(auth *service.AuthService) *AuthHandler {
 }
 
 type registerReq struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Nickname string `json:"nickname"`
-	School   string `json:"school"`
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	Nickname  string `json:"nickname"`
+	School    string `json:"school"`
+	DegreeTag string `json:"degree_tag"`
 }
 
 type loginReq struct {
@@ -36,12 +37,12 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		httpx.Fail(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	res, err := h.auth.Register(req.Username, req.Password, req.Nickname, req.School)
+	res, err := h.auth.Register(req.Username, req.Password, req.Nickname, req.School, req.DegreeTag)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrUsernameTaken):
 			httpx.Fail(c, http.StatusConflict, err.Error())
-		case errors.Is(err, service.ErrWeakInput):
+		case errors.Is(err, service.ErrWeakInput), errors.Is(err, service.ErrInvalidDegreeTag):
 			httpx.Fail(c, http.StatusBadRequest, err.Error())
 		default:
 			httpx.Fail(c, http.StatusBadRequest, err.Error())

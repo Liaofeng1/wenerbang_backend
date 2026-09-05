@@ -17,6 +17,7 @@ var (
 	ErrInvalidCredentials = errors.New("用户名或密码错误")
 	ErrUsernameTaken      = errors.New("用户名已被占用")
 	ErrWeakInput          = errors.New("用户名和密码不能为空")
+	ErrInvalidDegreeTag   = errors.New("请选择有效的学位类别")
 )
 
 type AuthService struct {
@@ -32,14 +33,18 @@ type AuthResult struct {
 	User  *model.User `json:"user"`
 }
 
-func (s *AuthService) Register(username, password, nickname, school string) (*AuthResult, error) {
+func (s *AuthService) Register(username, password, nickname, school, degreeTag string) (*AuthResult, error) {
 	username = strings.TrimSpace(username)
 	password = strings.TrimSpace(password)
+	degreeTag = strings.TrimSpace(degreeTag)
 	if username == "" || password == "" {
 		return nil, ErrWeakInput
 	}
 	if len(password) < 4 {
 		return nil, errors.New("密码至少 4 位")
+	}
+	if !model.IsValidDegreeTag(degreeTag) {
+		return nil, ErrInvalidDegreeTag
 	}
 
 	var count int64
@@ -63,6 +68,7 @@ func (s *AuthService) Register(username, password, nickname, school string) (*Au
 		PasswordHash: string(hash),
 		Nickname:     nickname,
 		School:       school,
+		DegreeTag:    degreeTag,
 		Points:       config.RegisterBonus(),
 	}
 	if err := s.db.Create(user).Error; err != nil {
