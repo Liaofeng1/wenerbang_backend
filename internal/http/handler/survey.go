@@ -52,6 +52,19 @@ func (h *SurveyHandler) ListMine(c *gin.Context) {
 	httpx.OK(c, list)
 }
 
+func (h *SurveyHandler) Close(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	survey, err := h.surveys.Close(id, middleware.UserID(c))
+	if err != nil {
+		mapSurveyErr(c, err)
+		return
+	}
+	httpx.OK(c, survey)
+}
+
 func (h *SurveyHandler) Get(c *gin.Context) {
 	id, ok := parseID(c)
 	if !ok {

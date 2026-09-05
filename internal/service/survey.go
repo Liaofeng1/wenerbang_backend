@@ -322,6 +322,38 @@ func (s *SurveyService) ListMine(userID uint) ([]model.Survey, error) {
 	return list, nil
 }
 
+// Close lets the publisher manually stop an open survey (delist from hall).
+func (s *SurveyService) Close(surveyID, publisherID uint) (*model.Survey, error) {
+	var survey model.Survey
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&survey, surveyID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if survey.PublisherID != publisherID {
+			return ErrForbidden
+		}
+		if survey.Status != model.SurveyStatusOpen {
+			return ErrSurveyClosed
+		}
+		survey.Status = model.SurveyStatusClosed
+		if err := refundFrozenBounty(tx, &survey); err != nil {
+			return err
+		}
+		return tx.Save(&survey).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	tmp := []model.Survey{survey}
+	s.attachFillStats(tmp)
+	attachPinFlagsPtr(tmp)
+	survey = tmp[0]
+	return &survey, nil
+}
+
 func (s *SurveyService) Get(id uint) (*model.Survey, error) {
 	var survey model.Survey
 	if err := s.db.First(&survey, id).Error; err != nil {
