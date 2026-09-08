@@ -35,6 +35,10 @@ func NewAuthService(db *gorm.DB) *AuthService {
 	return &AuthService{db: db}
 }
 
+func (s *AuthService) DB() *gorm.DB {
+	return s.db
+}
+
 type AuthResult struct {
 	Token string      `json:"token"`
 	User  *model.User `json:"user"`
@@ -43,6 +47,7 @@ type AuthResult struct {
 type RegisterInput struct {
 	Username   string
 	Password   string
+	Email      string
 	Nickname   string
 	School     string
 	Major      string
@@ -55,6 +60,7 @@ type RegisterInput struct {
 func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 	username := strings.TrimSpace(in.Username)
 	password := strings.TrimSpace(in.Password)
+	email := strings.TrimSpace(strings.ToLower(in.Email))
 	school := strings.TrimSpace(in.School)
 	major := strings.TrimSpace(in.Major)
 	inviteCode := strings.ToUpper(strings.TrimSpace(in.InviteCode))
@@ -67,6 +73,12 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 	if len(password) < 4 {
 		return nil, errors.New("密码至少 4 位")
 	}
+	if email == "" {
+		return nil, errors.New("邮箱不能为空")
+	}
+	if !isValidEmail(email) {
+		return nil, errors.New("邮箱格式不正确")
+	}
 	if !model.IsValidGender(gender) || !model.IsValidRegion(region) || !model.IsValidCityTier(cityTier) {
 		return nil, ErrInvalidProfile
 	}
@@ -75,6 +87,12 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 	}
 	if school == "" {
 		school = "中国人民大学"
+	}
+
+	// Check email verification
+	emailSvc := NewEmailService(s.db)
+	if err := emailSvc.CheckEmailVerified(email); err != nil {
+		return nil, err
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -94,6 +112,15 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 		}
 		if count > 0 {
 			return ErrUsernameTaken
+		}
+
+		// Double-check email not taken (race condition guard)
+		var emailCount int64
+		if err := tx.Model(&model.User{}).Where("email = ?", email).Count(&emailCount).Error; err != nil {
+			return err
+		}
+		if emailCount > 0 {
+			return ErrEmailTaken
 		}
 
 		var inviter *model.User
@@ -123,17 +150,19 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 		}
 
 		user := &model.User{
-			Username:     username,
-			PasswordHash: string(hash),
-			Nickname:     nickname,
-			School:       school,
-			Major:        major,
-			Gender:       gender,
-			Region:       region,
-			CityTier:     cityTier,
-			InviteCode:   code,
-			InvitedByID:  invitedBy,
-			Points:       pts,
+			Username:      username,
+			Email:         email,
+			EmailVerified: true,
+			PasswordHash:  string(hash),
+			Nickname:      nickname,
+			School:        school,
+			Major:         major,
+			Gender:        gender,
+			Region:        region,
+			CityTier:      cityTier,
+			InviteCode:    code,
+			InvitedByID:   invitedBy,
+			Points:        pts,
 		}
 		if err := tx.Create(user).Error; err != nil {
 			return err
@@ -339,4 +368,26 @@ func (s *AuthService) issue(user *model.User) (*AuthResult, error) {
 	}
 	level.FillUser(user)
 	return &AuthResult{Token: token, User: user}, nil
+}
+
+func isValidEmail(email string) bool {
+	// Simple validation: contains @ and at least one dot after @
+	at := -1
+	for i, c := range email {
+		if c == '@' {
+			at = i
+			break
+		}
+	}
+	if at < 1 || at >= len(email)-1 {
+		return false
+	}
+	dot := -1
+	for i := at + 1; i < len(email); i++ {
+		if email[i] == '.' {
+			dot = i
+			break
+		}
+	}
+	return dot > at+1 && dot < len(email)-1
 }

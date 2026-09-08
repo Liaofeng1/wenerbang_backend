@@ -37,6 +37,8 @@ func New(db *gorm.DB) *gin.Engine {
 	{
 		api.POST("/auth/register", authH.Register)
 		api.POST("/auth/login", authH.Login)
+		api.POST("/auth/send-code", authH.SendEmailCode)
+		api.POST("/auth/verify-code", authH.VerifyEmailCode)
 		api.GET("/meta/profile-options", handler.ProfileOptions)
 
 		auth := api.Group("")
