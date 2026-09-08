@@ -3,6 +3,8 @@ package main
 import (
 	"log"
 
+	_ "github.com/joho/godotenv/autoload"
+
 	"wenbang/internal/app"
 )
 

@@ -89,12 +89,6 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 		school = "中国人民大学"
 	}
 
-	// Check email verification
-	emailSvc := NewEmailService(s.db)
-	if err := emailSvc.CheckEmailVerified(email); err != nil {
-		return nil, err
-	}
-
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
@@ -106,6 +100,15 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 
 	var created *model.User
 	err = s.db.Transaction(func(tx *gorm.DB) error {
+		// Check email verification inside transaction (atomic with user creation)
+		var ev model.EmailVerification
+		if err := tx.Where("email = ? AND verified = ?", email, true).First(&ev).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrEmailNotVerified
+			}
+			return err
+		}
+
 		var count int64
 		if err := tx.Model(&model.User{}).Where("username = ?", username).Count(&count).Error; err != nil {
 			return err
@@ -182,6 +185,8 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Clean up verification record after successful registration
+	s.db.Where("email = ?", email).Delete(&model.EmailVerification{})
 	return s.issue(created)
 }
 

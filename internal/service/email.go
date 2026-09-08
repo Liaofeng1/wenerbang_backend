@@ -16,10 +16,10 @@ import (
 )
 
 var (
-	ErrEmailTaken      = errors.New("该邮箱已被注册")
-	ErrEmailCodeInvalid = errors.New("验证码错误或已过期")
-	ErrEmailVerified    = errors.New("邮箱已验证通过")
-	ErrEmailNotVerified = errors.New("请先验证邮箱")
+	ErrEmailTaken        = errors.New("该邮箱已被注册")
+	ErrEmailCodeInvalid  = errors.New("验证码错误或已过期")
+	ErrEmailVerified     = errors.New("邮箱已验证通过")
+	ErrEmailNotVerified  = errors.New("请先验证邮箱")
 	ErrEmailCodeCooldown = errors.New("请稍后再试，验证码发送过于频繁")
 )
 
@@ -48,9 +48,9 @@ func (s *EmailService) SendVerificationCode(email string) error {
 		return ErrEmailTaken
 	}
 
-	// Check cooldown: don't allow resend within 60 seconds
+	// Check cooldown: don't allow resend within 60 seconds (check any record, regardless of verified status)
 	var existing model.EmailVerification
-	if err := s.db.Where("email = ? AND verified = ?", email, false).First(&existing).Error; err == nil {
+	if err := s.db.Where("email = ?", email).First(&existing).Error; err == nil {
 		if !existing.IsExpired() && time.Since(existing.CreatedAt).Seconds() < 60 {
 			return ErrEmailCodeCooldown
 		}
