@@ -48,6 +48,7 @@ func New(db *gorm.DB) *gin.Engine {
 			auth.PATCH("/me", meH.Update)
 			auth.PUT("/me", meH.Update)
 			auth.POST("/me/checkin", meH.CheckIn)
+			auth.POST("/me/bind-email", meH.BindEmail)
 			auth.POST("/surveys", surveyH.Create)
 			auth.GET("/surveys", surveyH.List)
 			auth.GET("/surveys/mine", surveyH.ListMine)
