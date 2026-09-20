@@ -8,9 +8,11 @@ import (
 )
 
 type User struct {
-	ID           uint      `gorm:"primaryKey" json:"id"`
-	Username     string    `gorm:"uniqueIndex;size:64;not null" json:"username"`
-	PasswordHash string    `gorm:"size:255;not null" json:"-"`
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	Username       string    `gorm:"uniqueIndex;size:64;not null" json:"username"`
+	Email          string    `gorm:"uniqueIndex;size:255;not null" json:"email"`
+	EmailVerified  bool      `gorm:"not null;default:false" json:"email_verified"`
+	PasswordHash   string    `gorm:"size:255;not null" json:"-"`
 	Nickname     string    `gorm:"size:64" json:"nickname"`
 	School       string    `gorm:"size:128" json:"school"`
 	Major        string    `gorm:"size:128" json:"major"`

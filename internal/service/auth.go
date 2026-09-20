@@ -35,6 +35,10 @@ func NewAuthService(db *gorm.DB) *AuthService {
 	return &AuthService{db: db}
 }
 
+func (s *AuthService) DB() *gorm.DB {
+	return s.db
+}
+
 type AuthResult struct {
 	Token string      `json:"token"`
 	User  *model.User `json:"user"`
@@ -43,6 +47,7 @@ type AuthResult struct {
 type RegisterInput struct {
 	Username   string
 	Password   string
+	Email      string
 	Nickname   string
 	School     string
 	Major      string
@@ -55,6 +60,7 @@ type RegisterInput struct {
 func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 	username := strings.TrimSpace(in.Username)
 	password := strings.TrimSpace(in.Password)
+	email := strings.TrimSpace(strings.ToLower(in.Email))
 	school := strings.TrimSpace(in.School)
 	major := strings.TrimSpace(in.Major)
 	inviteCode := strings.ToUpper(strings.TrimSpace(in.InviteCode))
@@ -66,6 +72,12 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 	}
 	if len(password) < 4 {
 		return nil, errors.New("密码至少 4 位")
+	}
+	if email == "" {
+		return nil, errors.New("邮箱不能为空")
+	}
+	if !isValidEmail(email) {
+		return nil, errors.New("邮箱格式不正确")
 	}
 	if !model.IsValidGender(gender) || !model.IsValidRegion(region) || !model.IsValidCityTier(cityTier) {
 		return nil, ErrInvalidProfile
@@ -88,12 +100,30 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 
 	var created *model.User
 	err = s.db.Transaction(func(tx *gorm.DB) error {
+		// Check email verification inside transaction (atomic with user creation)
+		var ev model.EmailVerification
+		if err := tx.Where("email = ? AND verified = ?", email, true).First(&ev).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrEmailNotVerified
+			}
+			return err
+		}
+
 		var count int64
 		if err := tx.Model(&model.User{}).Where("username = ?", username).Count(&count).Error; err != nil {
 			return err
 		}
 		if count > 0 {
 			return ErrUsernameTaken
+		}
+
+		// Double-check email not taken (race condition guard)
+		var emailCount int64
+		if err := tx.Model(&model.User{}).Where("email = ?", email).Count(&emailCount).Error; err != nil {
+			return err
+		}
+		if emailCount > 0 {
+			return ErrEmailTaken
 		}
 
 		var inviter *model.User
@@ -123,17 +153,19 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 		}
 
 		user := &model.User{
-			Username:     username,
-			PasswordHash: string(hash),
-			Nickname:     nickname,
-			School:       school,
-			Major:        major,
-			Gender:       gender,
-			Region:       region,
-			CityTier:     cityTier,
-			InviteCode:   code,
-			InvitedByID:  invitedBy,
-			Points:       pts,
+			Username:      username,
+			Email:         email,
+			EmailVerified: true,
+			PasswordHash:  string(hash),
+			Nickname:      nickname,
+			School:        school,
+			Major:         major,
+			Gender:        gender,
+			Region:        region,
+			CityTier:      cityTier,
+			InviteCode:    code,
+			InvitedByID:   invitedBy,
+			Points:        pts,
 		}
 		if err := tx.Create(user).Error; err != nil {
 			return err
@@ -153,7 +185,54 @@ func (s *AuthService) Register(in RegisterInput) (*AuthResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Clean up verification record after successful registration
+	s.db.Where("email = ?", email).Delete(&model.EmailVerification{})
 	return s.issue(created)
+}
+
+// BindEmail binds a verified email to an existing user (for legacy users who registered without email).
+func (s *AuthService) BindEmail(userID uint, email string) (*model.User, error) {
+	email = strings.TrimSpace(strings.ToLower(email))
+	if email == "" {
+		return nil, errors.New("邮箱不能为空")
+	}
+	if !isValidEmail(email) {
+		return nil, errors.New("邮箱格式不正确")
+	}
+
+	// Check if email is already taken by another user
+	var count int64
+	if err := s.db.Model(&model.User{}).Where("email = ? AND id != ?", email, userID).Count(&count).Error; err != nil {
+		return nil, err
+	}
+	if count > 0 {
+		return nil, ErrEmailTaken
+	}
+
+	// Check if email is verified
+	var ev model.EmailVerification
+	if err := s.db.Where("email = ? AND verified = ?", email, true).First(&ev).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrEmailNotVerified
+		}
+		return nil, err
+	}
+
+	// Update user's email
+	var user model.User
+	if err := s.db.First(&user, userID).Error; err != nil {
+		return nil, err
+	}
+	user.Email = email
+	user.EmailVerified = true
+	if err := s.db.Save(&user).Error; err != nil {
+		return nil, err
+	}
+
+	// Clean up verification record
+	s.db.Where("email = ?", email).Delete(&model.EmailVerification{})
+	level.FillUser(&user)
+	return &user, nil
 }
 
 func (s *AuthService) Login(username, password string) (*AuthResult, error) {
@@ -339,4 +418,26 @@ func (s *AuthService) issue(user *model.User) (*AuthResult, error) {
 	}
 	level.FillUser(user)
 	return &AuthResult{Token: token, User: user}, nil
+}
+
+func isValidEmail(email string) bool {
+	// Simple validation: contains @ and at least one dot after @
+	at := -1
+	for i, c := range email {
+		if c == '@' {
+			at = i
+			break
+		}
+	}
+	if at < 1 || at >= len(email)-1 {
+		return false
+	}
+	dot := -1
+	for i := at + 1; i < len(email); i++ {
+		if email[i] == '.' {
+			dot = i
+			break
+		}
+	}
+	return dot > at+1 && dot < len(email)-1
 }

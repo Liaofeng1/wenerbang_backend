@@ -102,6 +102,42 @@ func TargetingDeliveryMult() int {
 	return n
 }
 
+func EmailEnabled() bool {
+	return getenv("SMTP_HOST", "") != ""
+}
+
+func SMTPHost() string {
+	return getenv("SMTP_HOST", "")
+}
+
+func SMTPPort() int {
+	n, err := strconv.Atoi(getenv("SMTP_PORT", "587"))
+	if err != nil || n <= 0 {
+		return 587
+	}
+	return n
+}
+
+func SMTPUser() string {
+	return getenv("SMTP_USER", "")
+}
+
+func SMTPPass() string {
+	return getenv("SMTP_PASS", "")
+}
+
+func SMTPFrom() string {
+	return getenv("SMTP_FROM", "")
+}
+
+func EmailVerificationExpireMinutes() int {
+	n, err := strconv.Atoi(getenv("EMAIL_VERIFICATION_EXPIRE", "30"))
+	if err != nil || n <= 0 {
+		return 30
+	}
+	return n
+}
+
 func ReportFastRatio() float64 {
 	n, err := strconv.ParseFloat(getenv("REPORT_FAST_RATIO", "0.5"), 64)
 	if err != nil || n <= 0 || n >= 1 {
