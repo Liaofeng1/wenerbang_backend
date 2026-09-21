@@ -29,9 +29,9 @@ func AppEnv() string {
 }
 
 func RegisterBonus() int {
-	n, err := strconv.Atoi(getenv("REGISTER_BONUS", "30"))
+	n, err := strconv.Atoi(getenv("REGISTER_BONUS", "150"))
 	if err != nil {
-		return 30
+		return 150
 	}
 	return n
 }
